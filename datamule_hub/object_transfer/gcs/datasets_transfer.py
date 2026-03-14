@@ -9,6 +9,8 @@ from gcloud.aio.storage import Storage
 
 from ...api_key import api_key
 from ...datasets import DATASET_NAME_MAP
+from .utils import _get_storage
+
 
 
 async def _get_dataset_url(session, dataset_name):
@@ -58,7 +60,7 @@ async def _transfer_dataset(session, storage, semaphore, dataset, bucket, prefix
 async def _transfer_datasets(datasets, gcs_credentials, max_workers, retry_errors, prefix=None):
     connector = aiohttp.TCPConnector(limit=max_workers, ssl=ssl.create_default_context())
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=600)) as session:
-        async with Storage(service_file=gcs_credentials.get('service_file'), session=session) as storage:
+        async with _get_storage(gcs_credentials, session) as storage:
             semaphore = asyncio.Semaphore(max_workers)
             tasks = [_transfer_dataset(session, storage, semaphore, d, gcs_credentials['bucket_name'], prefix, retry_errors) for d in datasets]
 
@@ -76,7 +78,7 @@ async def _transfer_datasets(datasets, gcs_credentials, max_workers, retry_error
             return failed
 
 
-def datasets_transfer(datasets, gcs_credentials, max_workers=4, errors_json_filename='errors_gcs_datasets_transfer.json', retry_errors=3, prefix=None):
+def datasets_transfer(datasets, gcs_credentials, max_workers=4, errors_json_filename='errors_datasets_transfer.json', retry_errors=3, prefix=None):
     failed = asyncio.run(_transfer_datasets(datasets, gcs_credentials, max_workers, retry_errors, prefix=prefix))
 
     if failed and errors_json_filename:

@@ -10,5 +10,6 @@ s3_credentials = {
 
 datasets_transfer(
     datasets=['sec_accessions','sec_accession_cik_table'],
-    s3_credentials=s3_credentials
+    s3_credentials=s3_credentials,
+    prefix = ""
 )

@@ -22,8 +22,8 @@ pip install datamule_hub
 
 Current supported methods. Subject to change.
 
-- AWS S3 via `aioboto3` — authenticate via S3 credentials
-- GCP Cloud Storage via service account credentials
+- AWS S3 via `aioboto3` — authenticate via [IAM access keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)
+- GCP Cloud Storage via `gcloud-aio-storage` — authenticate via service account JSON (`service_file`) or [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) (`gcloud auth application-default login`)
 
 ## Quickstart
 

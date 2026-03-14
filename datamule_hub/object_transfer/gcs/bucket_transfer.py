@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from gcloud.aio.storage import Storage
 
 from ..utils import _generate_dates, _get_urls
+from .utils import _get_storage
 
 
 async def _transfer_file(session, storage, semaphore, url, bucket, prefix=None, retry_errors=3):
@@ -37,7 +38,7 @@ async def _transfer_file(session, storage, semaphore, url, bucket, prefix=None, 
 async def _transfer_urls(urls, gcs_credentials, max_workers, retry_errors, prefix=None):
     connector = aiohttp.TCPConnector(limit=max_workers, ssl=ssl.create_default_context(), ttl_dns_cache=300)
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=600)) as session:
-        async with Storage(service_file=gcs_credentials.get('service_file'), session=session) as storage:
+        async with _get_storage(gcs_credentials, session) as storage:
             semaphore = asyncio.Semaphore(max_workers)
             tasks = [_transfer_file(session, storage, semaphore, url, gcs_credentials['bucket_name'], prefix, retry_errors) for url in urls]
 
@@ -55,7 +56,7 @@ async def _transfer_urls(urls, gcs_credentials, max_workers, retry_errors, prefi
             return failed
 
 
-def bucket_transfer(datamule_bucket, gcs_credentials, max_workers=4, errors_json_filename='errors_gcs_bucket_transfer.json',
+def bucket_transfer(datamule_bucket, gcs_credentials, max_workers=4, errors_json_filename='errors_bucket_transfer.json',
                 retry_errors=3, force_daily=True, cik=None, submission_type=None, filing_date=None, accession_number=None, prefix=None):
 
     if datamule_bucket not in ['filings_sgml_r2', 'sec_filings_sgml_r2']:
