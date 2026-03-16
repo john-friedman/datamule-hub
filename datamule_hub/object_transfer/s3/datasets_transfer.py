@@ -106,7 +106,7 @@ async def _transfer_dataset(session, s3_client, semaphore, dataset, bucket, pref
 
 async def _transfer_datasets(datasets, s3_credentials, max_workers, retry_errors, prefix=None):
     connector = aiohttp.TCPConnector(limit=max_workers, ssl=ssl.create_default_context())
-    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=600)) as session:
+    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=7200)) as session:
         async with aioboto3.Session().client(
             's3',
             aws_access_key_id=s3_credentials['aws_access_key_id'],

@@ -5,7 +5,6 @@ import json
 from urllib.parse import urlparse
 from tqdm import tqdm
 from datetime import datetime, timezone
-from gcloud.aio.storage import Storage
 
 from ..utils import _generate_dates, _get_urls
 from .utils import _get_storage
@@ -37,7 +36,7 @@ async def _transfer_file(session, storage, semaphore, url, bucket, prefix=None, 
 
 async def _transfer_urls(urls, gcs_credentials, max_workers, retry_errors, prefix=None):
     connector = aiohttp.TCPConnector(limit=max_workers, ssl=ssl.create_default_context(), ttl_dns_cache=300)
-    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=600)) as session:
+    async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=7200)) as session:
         async with _get_storage(gcs_credentials, session) as storage:
             semaphore = asyncio.Semaphore(max_workers)
             tasks = [_transfer_file(session, storage, semaphore, url, gcs_credentials['bucket_name'], prefix, retry_errors) for url in urls]
