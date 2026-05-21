@@ -3,7 +3,7 @@ from setuptools import setup
 setup(
     name="datamule_hub",
     author="John Friedman",
-    version="0.0.3",
+    version="0.0.4",
     description="Access Datamule cloud",
     url="https://github.com/john-friedman/datamule-hub",
     install_requires=[

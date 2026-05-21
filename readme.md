@@ -13,10 +13,20 @@ pip install datamule_hub
 
 ## Functions
 
+Databases
 - query_database
+
+Datasets
 - download_dataset
+
+Object Storage
 - bucket_transfer (transfer objects in a bucket to your cloud)
 - dataset_transfer (transfer datasets to your cloud)
+
+Webhooks
+- add_endpoints
+- list_endpoints
+- remove_endpoints
 
 ## Supported Providers
 
