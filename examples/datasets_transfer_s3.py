@@ -1,4 +1,4 @@
-from datamule_hub.object_transfer.s3.datasets_transfer import datasets_transfer
+from datamulehub.object_transfer.s3.datasets_transfer import datasets_transfer
 
 s3_credentials = {
     's3_provider': 'aws',

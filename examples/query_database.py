@@ -1,4 +1,4 @@
-from datamule_hub import query_database
+from datamulehub import query_database
 
 result = query_database('sec-filings-lookup',
     cik=320193,

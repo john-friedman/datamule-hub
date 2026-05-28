@@ -1,4 +1,4 @@
-from datamule_hub.object_transfer.gcs.datasets_transfer import datasets_transfer
+from datamulehub.object_transfer.gcs.datasets_transfer import datasets_transfer
 
 gcs_credentials = {
     'bucket_name': 'your-bucket',

@@ -1,4 +1,4 @@
-from datamule_hub.object_transfer.s3.bucket_transfer import bucket_transfer
+from datamulehub.object_transfer.s3.bucket_transfer import bucket_transfer
 
 s3_credentials = {
     's3_provider': 'aws',
