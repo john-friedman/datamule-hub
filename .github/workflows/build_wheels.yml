@@ -25,10 +25,11 @@ jobs:
     - name: Build package
       run: |
         python setup.py sdist bdist_wheel
+        python -m twine check dist/*
     
     - name: Upload to PyPI
       env:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
       run: |
-        twine upload dist/*
+        python -m twine upload --verbose dist/*
