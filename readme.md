@@ -7,7 +7,7 @@ Python package to use [datamule.xyz](https://datamule.xyz/) endpoints.
 ## Installation
 
 ```
-pip install datamulehub
+pip install datamule-hub
 ```
 
 

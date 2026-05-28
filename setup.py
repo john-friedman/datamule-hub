@@ -1,7 +1,7 @@
 from setuptools import find_packages, setup
 
 setup(
-    name="datamulehub",
+    name="datamule-hub",
     author="John Friedman",
     version="0.1.1",
     description="Access Datamule cloud",
