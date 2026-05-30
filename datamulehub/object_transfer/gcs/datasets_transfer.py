@@ -1,6 +1,6 @@
 import json
 import urllib
-import requests
+import urllib.request
 from tqdm import tqdm
 from datetime import datetime, timezone
 from google.cloud import storage as gcs
@@ -11,8 +11,9 @@ from ...datasets import DATASET_NAME_MAP
 
 def _get_dataset_url(dataset_name):
     api_url = f"https://api.datamule.xyz/dataset/{urllib.parse.quote(dataset_name)}?api_key={api_key}"
-    response = requests.get(api_url, headers={'User-Agent': 'datamule-python'})
-    data = response.json()
+    request = urllib.request.Request(api_url, headers={'User-Agent': 'datamule-python'})
+    with urllib.request.urlopen(request) as response:
+        data = json.loads(response.read().decode('utf-8'))
     if not data.get('success'):
         raise Exception(f"API error: {data.get('error', 'Unknown error')}")
     billing = data.get('metadata', {}).get('billing', {})
@@ -41,15 +42,15 @@ def _transfer_dataset(client, bucket, dataset, prefix=None, retry_errors=3):
     last_error = None
     for attempt in range(retry_errors + 1):
         try:
-            with requests.get(download_url, stream=True) as response:
-                response.raise_for_status()
+            request = urllib.request.Request(download_url, headers={'User-Agent': 'datamule-python'})
+            with urllib.request.urlopen(request) as response:
                 content_type = response.headers.get('Content-Type', 'application/octet-stream')
                 blob = bucket.blob(key)
                 blob.metadata = {
                     'source-url': download_url,
                     'transfer-date': datetime.now(timezone.utc).isoformat(),
                 }
-                blob.upload_from_file(response.raw, content_type=content_type)
+                blob.upload_from_file(response, content_type=content_type)
                 return {'success': True, 'dataset': dataset, 'size_bytes': blob.size, 'billing': billing}
         except Exception as e:
             if attempt < retry_errors:

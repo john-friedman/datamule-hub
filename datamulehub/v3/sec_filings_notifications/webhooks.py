@@ -6,7 +6,7 @@ import urllib.request
 from ...api_key import api_key
 
 
-API_BASE_URL = "https://api.datamule.xyz/sec-filings-webhooks"
+API_BASE_URL = "https://api.datamule.xyz/v3/sec-filings-webhooks"
 DEFAULT_SOURCES = ("Rss", "Efts", "anticipate")
 logger = logging.getLogger(__name__)
 
