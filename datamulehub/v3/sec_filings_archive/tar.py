@@ -1,200 +1,272 @@
 import asyncio
-import io
 import logging
-import shutil
+import re
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Optional, Union
 
 from tqdm.asyncio import tqdm
 
 from ...utils.format_accession import format_accession
 from ..sec_filings_lookup import stream_tar
+from .utils import (
+    DownloadItem,
+    TarBatchWriter,
+    decompress_zstd,
+    prepare_output_dir,
+    store_item,
+    validate_tar_max_size_mb,
+)
 
 
 BASE_URL = "https://sec-filings-archive.tar.datamule.xyz"
-DEFAULT_MAX_WORKERS = 64          # higher is fine with async
-DEFAULT_DECOMP_WORKERS = 8        # threadpool for CPU-bound zstd
-RANGE_MERGE_GAP = 64 * 1024       # merge ranges within 64 KB of each other
+DEFAULT_MAX_WORKERS = 100
+DEFAULT_DECOMP_WORKERS = 8
+MAX_REQUESTS_PER_CLIENT = 2000
+CONTENT_RANGE_RE = re.compile(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", re.IGNORECASE)
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Range merging (improvement #2)
-# ---------------------------------------------------------------------------
+def _parse_content_range(value: str) -> tuple[int, int]:
+    match = CONTENT_RANGE_RE.match(value.strip())
+    if match is None:
+        raise RuntimeError(f"Invalid Content-Range header: {value}")
 
-def _merge_ranges(files: list[dict], gap: int = RANGE_MERGE_GAP) -> list[dict]:
-    """
-    Given a list of file dicts (each with keys start, end, and anything else),
-    merge those whose byte ranges are within `gap` bytes of each other into a
-    single HTTP request. Returns a list of "batch" dicts:
-
-        {
-            "start":   int,          # merged range start
-            "end":     int,          # merged range end
-            "files":   [file_dict],  # originals covered by this range
-        }
-    """
-    if not files:
-        return []
-
-    sorted_files = sorted(files, key=lambda f: f["start"])
-    batches = []
-    current_batch = {"start": sorted_files[0]["start"],
-                     "end":   sorted_files[0]["end"],
-                     "files": [sorted_files[0]]}
-
-    for f in sorted_files[1:]:
-        if f["start"] <= current_batch["end"] + gap:
-            # Extend the current batch to cover this file too
-            current_batch["end"] = max(current_batch["end"], f["end"])
-            current_batch["files"].append(f)
-        else:
-            batches.append(current_batch)
-            current_batch = {"start": f["start"], "end": f["end"], "files": [f]}
-
-    batches.append(current_batch)
-    return batches
+    start = int(match.group(1))
+    end_inclusive = int(match.group(2))
+    return start, end_inclusive + 1
 
 
-# ---------------------------------------------------------------------------
-# Decompression (improvement #5) — runs in a thread so it never blocks the
-# async event loop.
-# ---------------------------------------------------------------------------
+def _extract_boundary(content_type: str) -> bytes:
+    parts = [part.strip() for part in content_type.split(";")]
+    if not parts or parts[0].lower() != "multipart/byteranges":
+        raise RuntimeError(f"Expected multipart/byteranges response, got: {content_type}")
 
-def _decompress_slice(compressed_blob: bytes, file_start: int,
-                      batch_start: int, file_end: int,
-                      batch_end: int, out_path: Path) -> Path:
-    """Extract the bytes belonging to one file from a (possibly merged) blob."""
-    try:
-        import zstandard as zstd
-    except ImportError as exc:
-        raise ImportError("Install zstandard to download SEC filings archives.") from exc
+    for part in parts[1:]:
+        name, separator, value = part.partition("=")
+        if separator and name.strip().lower() == "boundary":
+            boundary = value.strip()
+            if len(boundary) >= 2 and boundary[0] == boundary[-1] == '"':
+                boundary = boundary[1:-1]
+            if not boundary:
+                break
+            return boundary.encode("latin-1")
 
-    # Slice the portion of the decompressed blob that belongs to this file.
-    # We decompress the whole merged blob once and slice in memory.
-    dctx = zstd.ZstdDecompressor()
-    raw = dctx.decompress(compressed_blob)
-
-    # Offsets within the blob
-    rel_start = file_start - batch_start
-    rel_end   = file_end   - batch_start
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(raw[rel_start:rel_end])
-    return out_path
+    raise RuntimeError(f"Missing multipart boundary in Content-Type: {content_type}")
 
 
-# ---------------------------------------------------------------------------
-# Core async download (improvements #3 & #4)
-# ---------------------------------------------------------------------------
+def _parse_headers(header_blob: bytes) -> dict[str, str]:
+    headers = {}
+    for line in header_blob.decode("latin-1").split("\r\n"):
+        name, separator, value = line.partition(":")
+        if separator:
+            headers[name.strip().lower()] = value.strip()
+    return headers
 
-async def _download_batch(
-    session,           # httpx.AsyncClient — shared, persistent (improvement #3)
+
+def _parse_multipart_byteranges(body: bytes, content_type: str) -> dict[tuple[int, int], bytes]:
+    boundary = _extract_boundary(content_type)
+    first_boundary = b"--" + boundary
+    next_boundary = b"\r\n--" + boundary
+
+    position = body.find(first_boundary)
+    if position < 0:
+        raise RuntimeError("Multipart response did not contain the declared boundary.")
+
+    position += len(first_boundary)
+    ranges = {}
+
+    while True:
+        if body[position:position + 2] == b"--":
+            return ranges
+        if body[position:position + 2] != b"\r\n":
+            raise RuntimeError("Malformed multipart response after boundary.")
+        position += 2
+
+        header_end = body.find(b"\r\n\r\n", position)
+        if header_end < 0:
+            raise RuntimeError("Multipart part is missing a header terminator.")
+
+        headers = _parse_headers(body[position:header_end])
+        content_range = headers.get("content-range")
+        if content_range is None:
+            raise RuntimeError("Multipart part is missing Content-Range.")
+
+        data_start = header_end + 4
+        data_end = body.find(next_boundary, data_start)
+        if data_end < 0:
+            raise RuntimeError("Multipart part is missing a closing boundary.")
+
+        range_key = _parse_content_range(content_range)
+        if range_key in ranges:
+            raise RuntimeError(f"Duplicate multipart range returned: {range_key}")
+        ranges[range_key] = body[data_start:data_end]
+
+        position = data_end + len(next_boundary)
+
+
+def _parse_range_response(response, expected_count: int) -> dict[tuple[int, int], bytes]:
+    if response.status_code != 206:
+        raise RuntimeError(
+            f"Expected HTTP 206 for range request, got {response.status_code}: {response.url}"
+        )
+
+    if expected_count == 1:
+        content_range = response.headers.get("Content-Range")
+        if content_range is None:
+            raise RuntimeError("Single-range response is missing Content-Range.")
+        return {_parse_content_range(content_range): response.content}
+
+    content_type = response.headers.get("Content-Type", "")
+    return _parse_multipart_byteranges(response.content, content_type)
+
+
+def _decompress_document(compressed: bytes, logical_path: Path) -> DownloadItem:
+    return DownloadItem(logical_path=logical_path, data=decompress_zstd(compressed))
+
+
+def _logical_document_path(filing_date, accession_nd: str, filename: str, decompress: bool) -> Path:
+    name = Path(filename).name
+    if not decompress:
+        name = f"{name}.zst"
+    return Path(str(filing_date)) / accession_nd / name
+
+
+async def _download_accession_tar(
+    session,
     tar_url: str,
-    batch: dict,
-    output_dir: Path,
     filing_date,
+    accession_nd: str,
+    files: list[dict],
     loop,
-    decomp_pool,       # concurrent.futures.ThreadPoolExecutor (improvement #5)
+    decomp_pool,
     semaphore: asyncio.Semaphore,
-) -> list[Path]:
-    """Fetch one (possibly merged) byte range and fan out decompression."""
-    async with semaphore:
-        start, end = batch["start"], batch["end"]
-        headers = {"Range": f"bytes={start}-{end - 1}"}
+    decompress: bool,
+) -> list[DownloadItem]:
+    expected = {}
+    range_parts = []
+    for file_info in files:
+        start = int(file_info["start"])
+        end = int(file_info["end"])
+        range_key = (start, end)
+        if range_key in expected:
+            raise RuntimeError(f"Duplicate requested byte range for {tar_url}: {range_key}")
 
+        expected[range_key] = file_info
+        range_parts.append(f"{start}-{end - 1}")
+
+    headers = {"Range": f"bytes={','.join(range_parts)}"}
+
+    async with semaphore:
         response = await session.get(tar_url, headers=headers)
         response.raise_for_status()
-        if response.status_code != 206:
-            raise RuntimeError(
-                f"Expected HTTP 206 for range request, got {response.status_code}: {tar_url}"
-            )
-        compressed_blob = response.content
+        parts = _parse_range_response(response, len(expected))
 
-    # Fan out decompression for every file in this batch — all in parallel
-    # inside the thread pool so the event loop stays free (improvement #5).
-    decomp_futures = []
-    for f in batch["files"]:
-        accession_nd = format_accession(f["accession"], "no-dash")
-        out_path = output_dir / str(filing_date) / accession_nd / Path(f["filename"]).name
-        decomp_futures.append(
+    expected_ranges = set(expected)
+    returned_ranges = set(parts)
+    if returned_ranges != expected_ranges:
+        missing = sorted(expected_ranges - returned_ranges)
+        unexpected = sorted(returned_ranges - expected_ranges)
+        raise RuntimeError(
+            f"Multipart response ranges did not match request for {tar_url}: "
+            f"missing={missing[:5]} unexpected={unexpected[:5]}"
+        )
+
+    items: list[DownloadItem] = []
+    futures = []
+    for range_key, file_info in expected.items():
+        logical_path = _logical_document_path(
+            filing_date,
+            accession_nd,
+            file_info["filename"],
+            decompress,
+        )
+        data = parts[range_key]
+
+        if not decompress:
+            items.append(DownloadItem(logical_path=logical_path, data=data))
+            continue
+
+        futures.append(
             loop.run_in_executor(
                 decomp_pool,
-                _decompress_slice,
-                compressed_blob,
-                int(f["start"]),
-                start,
-                int(f["end"]),
-                end,
-                out_path,
+                _decompress_document,
+                data,
+                logical_path,
             )
         )
 
-    return list(await asyncio.gather(*decomp_futures))
+    if futures:
+        items.extend(await asyncio.gather(*futures))
+    return items
 
-
-# ---------------------------------------------------------------------------
-# Per-TAR grouping & dispatch (improvement #6)
-# ---------------------------------------------------------------------------
 
 async def _process_rows(
     rows: list[tuple],
-    output_dir: Path,
-    semaphore: asyncio.Semaphore,
-    session,
+    session_factory,
     loop,
     decomp_pool,
+    semaphore: asyncio.Semaphore,
     pbar,
+    decompress: bool,
+    tar_writer: Optional[TarBatchWriter],
+    output_dir: Path,
 ) -> list[Path]:
-    """
-    Group rows by (filing_date, accession) so all files from the same TAR
-    share a merged fetch plan, then dispatch batches concurrently.
-    """
-    # Group by TAR (improvement #6)
     by_tar: dict[tuple, list[dict]] = defaultdict(list)
     for filing_date, accession, filename, start, end in rows:
-        key = (filing_date, format_accession(accession, "no-dash"))
-        by_tar[key].append({
-            "accession": accession,
-            "filename":  filename,
-            "start":     int(start),
-            "end":       int(end),
+        accession_nd = format_accession(accession, "no-dash")
+        by_tar[(filing_date, accession_nd)].append({
+            "filename": filename,
+            "start": int(start),
+            "end": int(end),
         })
 
-    tasks = []
-    for (filing_date, accession_nd), files in by_tar.items():
-        tar_url = f"{BASE_URL}/{filing_date}/{accession_nd}.tar"
-        merged_batches = _merge_ranges(files)   # improvement #2
-        for batch in merged_batches:
-            tasks.append(
-                _download_batch(
-                    session=session,
-                    tar_url=tar_url,
-                    batch=batch,
-                    output_dir=output_dir,
-                    filing_date=filing_date,
-                    loop=loop,
-                    decomp_pool=decomp_pool,
-                    semaphore=semaphore,
-                )
-            )
-
+    grouped_requests = list(by_tar.items())
     paths: list[Path] = []
-    for coro in asyncio.as_completed(tasks):
-        try:
-            result = await coro
-            paths.extend(result)
-        except Exception as exc:
-            logger.error("Batch download failed: %s", exc)
-        finally:
-            pbar.update(1)
+
+    for offset in range(0, len(grouped_requests), MAX_REQUESTS_PER_CLIENT):
+        request_chunk = grouped_requests[offset:offset + MAX_REQUESTS_PER_CLIENT]
+        async with session_factory() as session:
+            tasks = []
+            for (filing_date, accession_nd), files in request_chunk:
+                tasks.append(
+                    _download_accession_tar(
+                        session=session,
+                        tar_url=f"{BASE_URL}/{filing_date}/{accession_nd}.tar",
+                        filing_date=filing_date,
+                        accession_nd=accession_nd,
+                        files=files,
+                        loop=loop,
+                        decomp_pool=decomp_pool,
+                        semaphore=semaphore,
+                        decompress=decompress,
+                    )
+                )
+
+            for coro in asyncio.as_completed(tasks):
+                result = await coro
+                paths.extend(store_item(output_dir, item, tar_writer) for item in result)
+                pbar.update(len(result))
 
     return paths
 
 
-# ---------------------------------------------------------------------------
-# Public entry-point — drop-in replacement for the original download_tar
-# ---------------------------------------------------------------------------
+def _make_http_client(httpx, max_workers: int):
+    return httpx.AsyncClient(
+        http2=True,
+        timeout=60.0,
+        headers={
+            "Accept": "application/octet-stream",
+            "Connection": "keep-alive",
+            "User-Agent": "datamule-hub",
+        },
+        limits=httpx.Limits(
+            max_connections=max_workers,
+            max_keepalive_connections=max_workers,
+        ),
+    )
+
 
 def download_tar(
     cik=None,
@@ -213,23 +285,17 @@ def download_tar(
     output_dir="downloads",
     max_workers=DEFAULT_MAX_WORKERS,
     decomp_workers=DEFAULT_DECOMP_WORKERS,
+    decompress=True,
+    tar_max_size_mb=512,
+    overwrite=False,
     quiet=False,
 ):
     """
-    Download and decompress TAR document ranges to output_dir/filingDate/accession/filename.
+    Download TAR document ranges.
 
-    Improvements over the original implementation
-    ---------------------------------------------
-    2. Contiguous / near-contiguous byte ranges for the same TAR are merged
-       into a single HTTP request (RANGE_MERGE_GAP controls the tolerance).
-    3. A single persistent httpx.AsyncClient is reused across all requests,
-       enabling HTTP/2 multiplexing and connection keep-alive.
-    4. asyncio replaces ThreadPoolExecutor for I/O, supporting hundreds of
-       concurrent requests with negligible memory overhead.
-    5. zstd decompression is offloaded to a separate ThreadPoolExecutor so
-       CPU work runs in parallel with ongoing downloads.
-    6. Rows are grouped by (filing_date, accession) before dispatch so all
-       files from the same TAR share a merged fetch plan.
+    By default, decompressed documents are written into batch_*.tar shards under
+    output_dir. Set tar_max_size_mb=None to write individual files to
+    output_dir/filingDate/accession/filename.
     """
     return asyncio.run(
         _download_tar_async(
@@ -249,6 +315,9 @@ def download_tar(
             output_dir=Path(output_dir),
             max_workers=max_workers,
             decomp_workers=decomp_workers,
+            decompress=decompress,
+            tar_max_size_mb=tar_max_size_mb,
+            overwrite=overwrite,
             quiet=quiet,
         )
     )
@@ -258,40 +327,35 @@ async def _download_tar_async(
     output_dir: Path,
     max_workers: int,
     decomp_workers: int,
+    decompress: bool,
+    tar_max_size_mb: Optional[Union[int, float]],
+    overwrite: bool,
     quiet: bool,
     **stream_kwargs,
 ):
+    validate_tar_max_size_mb(tar_max_size_mb)
+    if max_workers <= 0:
+        raise ValueError("max_workers must be a positive integer.")
+    prepare_output_dir(output_dir, overwrite=overwrite)
+
     try:
         import httpx
     except ImportError as exc:
         raise ImportError("Install httpx to use the async downloader.") from exc
 
-    from concurrent.futures import ThreadPoolExecutor
-
     loop = asyncio.get_running_loop()
-    semaphore = asyncio.Semaphore(max_workers)  # cap concurrent in-flight requests
+    semaphore = asyncio.Semaphore(max_workers)
     downloaded: list[Path] = []
+    tar_writer = TarBatchWriter(output_dir, tar_max_size_mb) if tar_max_size_mb is not None else None
 
-    # Improvements #3 & #4: single persistent async client with HTTP/2
-    async with httpx.AsyncClient(
-        http2=True,
-        timeout=60.0,
-        headers={
-            "Accept": "application/octet-stream",
-            "Connection": "keep-alive",
-            "User-Agent": "datamule-hub",
-        },
-        limits=httpx.Limits(
-            max_connections=max_workers,
-            max_keepalive_connections=max_workers,
-        ),
-    ) as session:
-        # Improvement #5: dedicated thread pool for decompression
+    try:
+        session_factory = lambda: _make_http_client(httpx, max_workers)
+
         with ThreadPoolExecutor(max_workers=decomp_workers,
                                 thread_name_prefix="decomp") as decomp_pool:
 
             with tqdm(total=0, desc="Downloading TAR documents",
-                      unit="batch", disable=quiet) as pbar:
+                      unit="file", disable=quiet) as pbar:
 
                 for lookup_page in stream_tar(**stream_kwargs):
                     rows = list(zip(
@@ -306,14 +370,19 @@ async def _download_tar_async(
 
                     batch_paths = await _process_rows(
                         rows=rows,
-                        output_dir=output_dir,
-                        semaphore=semaphore,
-                        session=session,
+                        session_factory=session_factory,
                         loop=loop,
                         decomp_pool=decomp_pool,
+                        semaphore=semaphore,
                         pbar=pbar,
+                        decompress=decompress,
+                        tar_writer=tar_writer,
+                        output_dir=output_dir,
                     )
                     downloaded.extend(batch_paths)
+    finally:
+        if tar_writer is not None:
+            tar_writer.close()
 
     logger.info(
         "TAR archive download complete: files=%s output_dir=%s",
