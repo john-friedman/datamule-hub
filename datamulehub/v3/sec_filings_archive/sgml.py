@@ -21,7 +21,7 @@ from .utils import (
 BASE_URL = "https://sec-filings-archive.sgml.datamule.xyz"
 DEFAULT_MAX_WORKERS = 100
 DEFAULT_DECOMP_WORKERS = 8
-MAX_REQUESTS_PER_CLIENT = 2000
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 logger = logging.getLogger(__name__)
 
 
@@ -30,22 +30,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _decompress_item(compressed: bytes, logical_path: Path) -> DownloadItem:
-    return DownloadItem(logical_path=logical_path, data=decompress_zstd(compressed))
+    if compressed.startswith(ZSTD_MAGIC):
+        return DownloadItem(logical_path=logical_path, data=decompress_zstd(compressed))
+    return DownloadItem(logical_path=logical_path, data=compressed)
 
 
-def _make_http_client(httpx):
-    return httpx.AsyncClient(
-        http2=True,
-        timeout=60.0,
+def _make_http_client(aiohttp, max_workers: int):
+    return aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit=max_workers, ttl_dns_cache=300),
+        timeout=aiohttp.ClientTimeout(total=60),
         headers={
             "Accept": "application/octet-stream",
             "Connection": "keep-alive",
             "User-Agent": "datamule-hub",
         },
-        limits=httpx.Limits(
-            max_connections=1,
-            max_keepalive_connections=1,
-        ),
     )
 
 
@@ -67,20 +65,26 @@ async def _download_one(
     filename = f"{accession_nd}.sgml" if decompress else f"{accession_nd}.sgml.zst"
     logical_path = Path(str(filing_date)) / filename
 
-    async with semaphore:
-        response = await session.get(url)
-        response.raise_for_status()
-        compressed = response.content
+    try:
+        async with semaphore:
+            async with session.get(url) as response:
+                response.raise_for_status()
+                compressed = await response.read()
 
-    if not decompress:
-        return DownloadItem(logical_path=logical_path, data=compressed)
+        if not decompress:
+            return DownloadItem(logical_path=logical_path, data=compressed)
 
-    return await loop.run_in_executor(
-        decomp_pool,
-        _decompress_item,
-        compressed,
-        logical_path,
-    )
+        return await loop.run_in_executor(
+            decomp_pool,
+            _decompress_item,
+            compressed,
+            logical_path,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"filing_date={filing_date} accession={accession_nd}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +111,6 @@ def download_sgml(
     decompress=True,
     tar_max_size_mb=512,
     overwrite=False,
-    quiet=False,
 ):
     """
     Download SGML archive objects.
@@ -116,14 +119,7 @@ def download_sgml(
     output_dir. Set tar_max_size_mb=None to write individual files to
     output_dir/filingDate/accession.sgml.
 
-    Improvements over the original implementation
-    ---------------------------------------------
-    1. A single persistent httpx.AsyncClient with HTTP/2 multiplexing and
-       connection keep-alive.
-    2. asyncio replaces ThreadPoolExecutor for I/O, supporting hundreds of
-       concurrent requests with negligible memory overhead.
-    3. zstd decompression is offloaded to a separate ThreadPoolExecutor so
-       CPU work runs in parallel with ongoing downloads.
+    Uses async HTTP, optional zstd decompression, and optional local tar batching.
     """
     return asyncio.run(
         _download_sgml_async(
@@ -146,7 +142,6 @@ def download_sgml(
             decompress=decompress,
             tar_max_size_mb=tar_max_size_mb,
             overwrite=overwrite,
-            quiet=quiet,
         )
     )
 
@@ -158,7 +153,6 @@ async def _download_sgml_async(
     decompress: bool,
     tar_max_size_mb: Optional[Union[int, float]],
     overwrite: bool,
-    quiet: bool,
     **stream_kwargs,
 ):
     validate_tar_max_size_mb(tar_max_size_mb)
@@ -167,9 +161,9 @@ async def _download_sgml_async(
     prepare_output_dir(output_dir, overwrite=overwrite)
 
     try:
-        import httpx
+        import aiohttp
     except ImportError as exc:
-        raise ImportError("Install httpx to use the async downloader.") from exc
+        raise ImportError("Install aiohttp to use the async downloader.") from exc
 
     loop = asyncio.get_running_loop()
     semaphore = asyncio.Semaphore(max_workers)
@@ -177,45 +171,43 @@ async def _download_sgml_async(
     tar_writer = TarBatchWriter(output_dir, tar_max_size_mb) if tar_max_size_mb is not None else None
 
     try:
-        with ThreadPoolExecutor(max_workers=decomp_workers,
-                                thread_name_prefix="decomp") as decomp_pool:
+        async with _make_http_client(aiohttp, max_workers) as session:
+            with ThreadPoolExecutor(max_workers=decomp_workers,
+                                    thread_name_prefix="decomp") as decomp_pool:
 
-            with tqdm(total=0, desc="Downloading SGML filings",
-                      unit="filing", disable=quiet) as pbar:
+                with tqdm(total=0, desc="Downloading SGML filings",
+                          unit="filing") as pbar:
 
-                for lookup_page in stream_sgml(**stream_kwargs):
-                    rows = list(zip(lookup_page["filingDate"], lookup_page["accession"]))
-                    pbar.total += len(rows)
-                    pbar.refresh()
+                    for lookup_page in stream_sgml(**stream_kwargs):
+                        rows = list(zip(lookup_page["filingDate"], lookup_page["accession"]))
+                        pbar.total += len(rows)
+                        pbar.refresh()
 
-                    for offset in range(0, len(rows), MAX_REQUESTS_PER_CLIENT):
-                        row_chunk = rows[offset:offset + MAX_REQUESTS_PER_CLIENT]
-                        async with _make_http_client(httpx) as session:
-                            tasks = [
-                                _download_one(
-                                    session=session,
-                                    filing_date=fd,
-                                    accession=acc,
-                                    loop=loop,
-                                    decomp_pool=decomp_pool,
-                                    semaphore=semaphore,
-                                    decompress=decompress,
+                        tasks = [
+                            _download_one(
+                                session=session,
+                                filing_date=fd,
+                                accession=acc,
+                                loop=loop,
+                                decomp_pool=decomp_pool,
+                                semaphore=semaphore,
+                                decompress=decompress,
+                            )
+                            for fd, acc in rows
+                        ]
+
+                        for coro in asyncio.as_completed(tasks):
+                            try:
+                                item = await coro
+                                downloaded.append(store_item(output_dir, item, tar_writer))
+                            except Exception as exc:
+                                logger.error(
+                                    "Download failed: %s: %r",
+                                    type(exc).__name__,
+                                    exc,
                                 )
-                                for fd, acc in row_chunk
-                            ]
-
-                            for coro in asyncio.as_completed(tasks):
-                                try:
-                                    item = await coro
-                                    downloaded.append(store_item(output_dir, item, tar_writer))
-                                except Exception as exc:
-                                    logger.error(
-                                        "Download failed: %s: %r",
-                                        type(exc).__name__,
-                                        exc,
-                                    )
-                                finally:
-                                    pbar.update(1)
+                            finally:
+                                pbar.update(1)
     finally:
         if tar_writer is not None:
             tar_writer.close()

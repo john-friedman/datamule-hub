@@ -1,6 +1,8 @@
 import asyncio
+import io
 import logging
 import re
+import tarfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -9,7 +11,7 @@ from typing import Optional, Union
 from tqdm.asyncio import tqdm
 
 from ...utils.format_accession import format_accession
-from ..sec_filings_lookup import stream_tar
+from ..sec_filings_lookup import stream_sgml, stream_tar
 from .utils import (
     DownloadItem,
     TarBatchWriter,
@@ -23,9 +25,12 @@ from .utils import (
 BASE_URL = "https://sec-filings-archive.tar.datamule.xyz"
 DEFAULT_MAX_WORKERS = 100
 DEFAULT_DECOMP_WORKERS = 8
-MAX_REQUESTS_PER_CLIENT = 2000
 CONTENT_RANGE_RE = re.compile(r"^bytes\s+(\d+)-(\d+)/(\d+|\*)$", re.IGNORECASE)
 logger = logging.getLogger(__name__)
+
+
+def _is_document_mode(document_type, filename, sequence) -> bool:
+    return document_type is not None or filename is not None or sequence is not None
 
 
 def _parse_content_range(value: str) -> tuple[int, int]:
@@ -106,20 +111,26 @@ def _parse_multipart_byteranges(body: bytes, content_type: str) -> dict[tuple[in
         position = data_end + len(next_boundary)
 
 
-def _parse_range_response(response, expected_count: int) -> dict[tuple[int, int], bytes]:
-    if response.status_code != 206:
+def _parse_range_response(
+    status: int,
+    url,
+    headers,
+    content: bytes,
+    expected_count: int,
+) -> dict[tuple[int, int], bytes]:
+    if status != 206:
         raise RuntimeError(
-            f"Expected HTTP 206 for range request, got {response.status_code}: {response.url}"
+            f"Expected HTTP 206 for range request, got {status}: {url}"
         )
 
     if expected_count == 1:
-        content_range = response.headers.get("Content-Range")
+        content_range = headers.get("Content-Range")
         if content_range is None:
             raise RuntimeError("Single-range response is missing Content-Range.")
-        return {_parse_content_range(content_range): response.content}
+        return {_parse_content_range(content_range): content}
 
-    content_type = response.headers.get("Content-Type", "")
-    return _parse_multipart_byteranges(response.content, content_type)
+    content_type = headers.get("Content-Type", "")
+    return _parse_multipart_byteranges(content, content_type)
 
 
 def _decompress_document(compressed: bytes, logical_path: Path) -> DownloadItem:
@@ -131,6 +142,69 @@ def _logical_document_path(filing_date, accession_nd: str, filename: str, decomp
     if not decompress:
         name = f"{name}.zst"
     return Path(str(filing_date)) / accession_nd / name
+
+
+def _extract_submission_items(
+    filing_date,
+    accession_nd: str,
+    tar_bytes: bytes,
+    decompress: bool,
+) -> list[DownloadItem]:
+    items = []
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:*") as archive:
+        for member in archive:
+            if not member.isfile():
+                continue
+
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                continue
+
+            data = extracted.read()
+            member_name = Path(member.name).name
+            if not member_name:
+                continue
+
+            if member_name == "metadata.json":
+                logical_path = Path(str(filing_date)) / accession_nd / member_name
+            elif decompress:
+                data = decompress_zstd(data)
+                logical_path = Path(str(filing_date)) / accession_nd / member_name
+            else:
+                logical_path = Path(str(filing_date)) / accession_nd / f"{member_name}.zst"
+
+            items.append(DownloadItem(logical_path=logical_path, data=data))
+
+    return items
+
+
+async def _download_submission_tar(
+    session,
+    tar_url: str,
+    filing_date,
+    accession_nd: str,
+    loop,
+    decomp_pool,
+    semaphore: asyncio.Semaphore,
+    decompress: bool,
+) -> list[DownloadItem]:
+    async with semaphore:
+        async with session.get(tar_url) as response:
+            response.raise_for_status()
+            if response.status != 200:
+                raise RuntimeError(
+                    f"Expected HTTP 200 for submission tar request, got {response.status}: {tar_url}"
+                )
+            tar_bytes = await response.read()
+
+    return await loop.run_in_executor(
+        decomp_pool,
+        _extract_submission_items,
+        filing_date,
+        accession_nd,
+        tar_bytes,
+        decompress,
+    )
 
 
 async def _download_accession_tar(
@@ -159,9 +233,16 @@ async def _download_accession_tar(
     headers = {"Range": f"bytes={','.join(range_parts)}"}
 
     async with semaphore:
-        response = await session.get(tar_url, headers=headers)
-        response.raise_for_status()
-        parts = _parse_range_response(response, len(expected))
+        async with session.get(tar_url, headers=headers) as response:
+            response.raise_for_status()
+            content = await response.read()
+            parts = _parse_range_response(
+                response.status,
+                response.url,
+                response.headers,
+                content,
+                len(expected),
+            )
 
     expected_ranges = set(expected)
     returned_ranges = set(parts)
@@ -225,46 +306,85 @@ async def _process_rows(
     grouped_requests = list(by_tar.items())
     paths: list[Path] = []
 
-    for offset in range(0, len(grouped_requests), MAX_REQUESTS_PER_CLIENT):
-        request_chunk = grouped_requests[offset:offset + MAX_REQUESTS_PER_CLIENT]
-        async with session_factory() as session:
-            tasks = []
-            for (filing_date, accession_nd), files in request_chunk:
-                tasks.append(
-                    _download_accession_tar(
-                        session=session,
-                        tar_url=f"{BASE_URL}/{filing_date}/{accession_nd}.tar",
-                        filing_date=filing_date,
-                        accession_nd=accession_nd,
-                        files=files,
-                        loop=loop,
-                        decomp_pool=decomp_pool,
-                        semaphore=semaphore,
-                        decompress=decompress,
-                    )
+    async with session_factory() as session:
+        tasks = []
+        for (filing_date, accession_nd), files in grouped_requests:
+            tasks.append(
+                _download_accession_tar(
+                    session=session,
+                    tar_url=f"{BASE_URL}/{filing_date}/{accession_nd}.tar",
+                    filing_date=filing_date,
+                    accession_nd=accession_nd,
+                    files=files,
+                    loop=loop,
+                    decomp_pool=decomp_pool,
+                    semaphore=semaphore,
+                    decompress=decompress,
                 )
+            )
 
-            for coro in asyncio.as_completed(tasks):
-                result = await coro
-                paths.extend(store_item(output_dir, item, tar_writer) for item in result)
-                pbar.update(len(result))
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            paths.extend(store_item(output_dir, item, tar_writer) for item in result)
+            pbar.update(len(result))
 
     return paths
 
 
-def _make_http_client(httpx, max_workers: int):
-    return httpx.AsyncClient(
-        http2=True,
-        timeout=60.0,
+async def _process_submissions(
+    rows: list[tuple],
+    session_factory,
+    loop,
+    decomp_pool,
+    semaphore: asyncio.Semaphore,
+    pbar,
+    decompress: bool,
+    tar_writer: Optional[TarBatchWriter],
+    output_dir: Path,
+) -> list[Path]:
+    seen = set()
+    submissions = []
+    for filing_date, accession in rows:
+        accession_nd = format_accession(accession, "no-dash")
+        key = (filing_date, accession_nd)
+        if key in seen:
+            continue
+        seen.add(key)
+        submissions.append(key)
+
+    paths: list[Path] = []
+    async with session_factory() as session:
+        tasks = [
+            _download_submission_tar(
+                session=session,
+                tar_url=f"{BASE_URL}/{filing_date}/{accession_nd}.tar",
+                filing_date=filing_date,
+                accession_nd=accession_nd,
+                loop=loop,
+                decomp_pool=decomp_pool,
+                semaphore=semaphore,
+                decompress=decompress,
+            )
+            for filing_date, accession_nd in submissions
+        ]
+
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            paths.extend(store_item(output_dir, item, tar_writer) for item in result)
+            pbar.update(1)
+
+    return paths
+
+
+def _make_http_client(aiohttp, max_workers: int):
+    return aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit=max_workers, ttl_dns_cache=300),
+        timeout=aiohttp.ClientTimeout(total=300),
         headers={
             "Accept": "application/octet-stream",
             "Connection": "keep-alive",
             "User-Agent": "datamule-hub",
         },
-        limits=httpx.Limits(
-            max_connections=max_workers,
-            max_keepalive_connections=max_workers,
-        ),
     )
 
 
@@ -288,7 +408,6 @@ def download_tar(
     decompress=True,
     tar_max_size_mb=512,
     overwrite=False,
-    quiet=False,
 ):
     """
     Download TAR document ranges.
@@ -296,6 +415,9 @@ def download_tar(
     By default, decompressed documents are written into batch_*.tar shards under
     output_dir. Set tar_max_size_mb=None to write individual files to
     output_dir/filingDate/accession/filename.
+
+    Queries without document_type, filename, or sequence download whole matching
+    submission TARs. Document-level filters use exact byte-range downloads.
     """
     return asyncio.run(
         _download_tar_async(
@@ -318,7 +440,6 @@ def download_tar(
             decompress=decompress,
             tar_max_size_mb=tar_max_size_mb,
             overwrite=overwrite,
-            quiet=quiet,
         )
     )
 
@@ -330,18 +451,22 @@ async def _download_tar_async(
     decompress: bool,
     tar_max_size_mb: Optional[Union[int, float]],
     overwrite: bool,
-    quiet: bool,
     **stream_kwargs,
 ):
     validate_tar_max_size_mb(tar_max_size_mb)
     if max_workers <= 0:
         raise ValueError("max_workers must be a positive integer.")
     prepare_output_dir(output_dir, overwrite=overwrite)
+    document_mode = _is_document_mode(
+        stream_kwargs.get("document_type"),
+        stream_kwargs.get("filename"),
+        stream_kwargs.get("sequence"),
+    )
 
     try:
-        import httpx
+        import aiohttp
     except ImportError as exc:
-        raise ImportError("Install httpx to use the async downloader.") from exc
+        raise ImportError("Install aiohttp to use the async downloader.") from exc
 
     loop = asyncio.get_running_loop()
     semaphore = asyncio.Semaphore(max_workers)
@@ -349,36 +474,59 @@ async def _download_tar_async(
     tar_writer = TarBatchWriter(output_dir, tar_max_size_mb) if tar_max_size_mb is not None else None
 
     try:
-        session_factory = lambda: _make_http_client(httpx, max_workers)
+        session_factory = lambda: _make_http_client(aiohttp, max_workers)
 
         with ThreadPoolExecutor(max_workers=decomp_workers,
                                 thread_name_prefix="decomp") as decomp_pool:
 
-            with tqdm(total=0, desc="Downloading TAR documents",
-                      unit="file", disable=quiet) as pbar:
+            with tqdm(total=0, desc="Downloading TAR filings",
+                      unit="file") as pbar:
 
-                for lookup_page in stream_tar(**stream_kwargs):
-                    rows = list(zip(
-                        lookup_page["filingDate"],
-                        lookup_page["accession"],
-                        lookup_page["filename"],
-                        lookup_page["start"],
-                        lookup_page["end"],
-                    ))
-                    pbar.total += len(rows)
-                    pbar.refresh()
+                if document_mode:
+                    lookup_pages = stream_tar(**stream_kwargs)
+                else:
+                    lookup_pages = stream_sgml(**stream_kwargs)
 
-                    batch_paths = await _process_rows(
-                        rows=rows,
-                        session_factory=session_factory,
-                        loop=loop,
-                        decomp_pool=decomp_pool,
-                        semaphore=semaphore,
-                        pbar=pbar,
-                        decompress=decompress,
-                        tar_writer=tar_writer,
-                        output_dir=output_dir,
-                    )
+                for lookup_page in lookup_pages:
+                    if document_mode:
+                        rows = list(zip(
+                            lookup_page["filingDate"],
+                            lookup_page["accession"],
+                            lookup_page["filename"],
+                            lookup_page["start"],
+                            lookup_page["end"],
+                        ))
+                        pbar.total += len(rows)
+                        pbar.refresh()
+
+                        batch_paths = await _process_rows(
+                            rows=rows,
+                            session_factory=session_factory,
+                            loop=loop,
+                            decomp_pool=decomp_pool,
+                            semaphore=semaphore,
+                            pbar=pbar,
+                            decompress=decompress,
+                            tar_writer=tar_writer,
+                            output_dir=output_dir,
+                        )
+                    else:
+                        rows = list(zip(lookup_page["filingDate"], lookup_page["accession"]))
+                        pbar.total += len(rows)
+                        pbar.refresh()
+
+                        batch_paths = await _process_submissions(
+                            rows=rows,
+                            session_factory=session_factory,
+                            loop=loop,
+                            decomp_pool=decomp_pool,
+                            semaphore=semaphore,
+                            pbar=pbar,
+                            decompress=decompress,
+                            tar_writer=tar_writer,
+                            output_dir=output_dir,
+                        )
+
                     downloaded.extend(batch_paths)
     finally:
         if tar_writer is not None:

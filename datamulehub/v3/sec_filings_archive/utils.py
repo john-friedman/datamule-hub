@@ -22,7 +22,16 @@ def decompress_zstd(data: bytes) -> bytes:
     except ImportError as exc:
         raise ImportError("Install zstandard to download SEC filings archives.") from exc
 
-    return zstd.ZstdDecompressor().decompress(data)
+    input_buffer = io.BytesIO(data)
+    decompressed = io.BytesIO()
+
+    try:
+        with zstd.ZstdDecompressor().stream_reader(input_buffer) as reader:
+            shutil.copyfileobj(reader, decompressed)
+        return decompressed.getvalue()
+    finally:
+        input_buffer.close()
+        decompressed.close()
 
 
 def write_file(output_dir: Path, item: DownloadItem) -> Path:
