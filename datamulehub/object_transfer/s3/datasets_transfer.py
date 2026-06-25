@@ -7,30 +7,31 @@ import urllib
 from tqdm import tqdm
 from datetime import datetime, timezone
 
-from ...api_key import api_key
-from ...datasets import DATASET_NAME_MAP
+from ...api_key import get_api_key
+from ...v3.datasets import resolve_path
 
 
-async def _get_dataset_url(session, dataset_name):
-    api_url = f"https://api.datamule.xyz/dataset/{urllib.parse.quote(dataset_name)}?api_key={api_key}"
-    async with session.get(api_url, headers={'User-Agent': 'datamule-python'}) as response:
+async def _get_dataset_url(session, dataset, api_key=None):
+    object_key = resolve_path(dataset)
+    async with session.post(
+        "https://api.datamule.xyz/v3/get-s3-link",
+        json={"path": object_key},
+        headers={
+            "Authorization": f"Bearer {get_api_key(api_key)}",
+            "User-Agent": "datamule-hub",
+        },
+    ) as response:
         data = await response.json()
     if not data.get('success'):
         raise Exception(f"API error: {data.get('error', 'Unknown error')}")
     billing = data.get('metadata', {}).get('billing', {})
-    return data['data']['download_url'], data['data']['size_gb'], billing
+    return data['data']['download_url'], data['data']['size_gb'], billing, data['data'].get('object_key', object_key)
 
 
 async def _transfer_dataset(session, s3_client, semaphore, dataset, bucket, prefix=None, retry_errors=3, multipart_threshold_mb=100, chunk_size_mb=8):
-    dataset_name = DATASET_NAME_MAP.get(dataset)
-    if not dataset_name:
-        return {'success': False, 'dataset': dataset, 'error': f"Unknown dataset: {dataset}"}
+    download_url, size_gb, billing, object_key = await _get_dataset_url(session, dataset)
 
-    download_url, size_gb, billing = await _get_dataset_url(session, dataset_name)
-
-    parsed = urllib.parse.urlparse(download_url)
-    path = urllib.parse.parse_qs(parsed.query).get('path', [''])[0]
-    key = urllib.parse.unquote(path.split('/')[-1]) or f"{dataset}.download"
+    key = object_key.strip("/") or f"{dataset}.download"
     if prefix:
         key = f"{prefix.rstrip('/')}/{key}"
 
@@ -97,7 +98,7 @@ async def _transfer_dataset(session, s3_client, semaphore, dataset, bucket, pref
                     except Exception:
                         pass
                 if attempt < retry_errors:
-                    download_url, _, _ = await _get_dataset_url(session, dataset_name)
+                    download_url, _, _, _ = await _get_dataset_url(session, dataset)
                     await asyncio.sleep(2 ** attempt)
                 last_error = e
 

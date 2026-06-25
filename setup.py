@@ -3,7 +3,7 @@ from setuptools import find_packages, setup
 setup(
     name="datamule-hub",
     author="John Friedman",
-    version="0.1.4",
+    version="0.2.0o",
     description="Access Datamule cloud",
     url="https://github.com/john-friedman/datamule-hub",
     packages=find_packages(),
@@ -14,6 +14,7 @@ setup(
         "gcloud-aio-storage",
         "google-auth",
         "google-cloud-storage",
+        "pyarrow",
         "websocket-client",
         "zstandard"
     ],

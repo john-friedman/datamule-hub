@@ -1,9 +1,10 @@
-from datamulehub import query_database
+from datamulehub import databases
 
-result = query_database('sec-filings-lookup',
-    cik=320193,
-    submissionType='10-K',
-    filingDate=('2024-01-01', '2024-12-31'),
-    containsXBRL=1)
 
-print(result)
+databases.query(
+    "SELECT * FROM simple_xbrl LIMIT 10",
+    output_dir="simple_xbrl_sample",
+)
+
+rows = databases.read_query("SELECT accessionnumber, filingdate FROM submissions_metadata LIMIT 10000")
+print(rows[0])

@@ -5,19 +5,29 @@ from tqdm import tqdm
 from datetime import datetime, timezone
 from google.cloud import storage as gcs
 
-from ...api_key import api_key
-from ...datasets import DATASET_NAME_MAP
+from ...api_key import get_api_key
+from ...v3.datasets import resolve_path
 
 
-def _get_dataset_url(dataset_name):
-    api_url = f"https://api.datamule.xyz/dataset/{urllib.parse.quote(dataset_name)}?api_key={api_key}"
-    request = urllib.request.Request(api_url, headers={'User-Agent': 'datamule-python'})
+def _get_dataset_url(dataset, api_key=None):
+    object_key = resolve_path(dataset)
+    body = json.dumps({"path": object_key}).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.datamule.xyz/v3/get-s3-link",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {get_api_key(api_key)}",
+            "Content-Type": "application/json",
+            "User-Agent": "datamule-hub",
+        },
+        method="POST",
+    )
     with urllib.request.urlopen(request) as response:
         data = json.loads(response.read().decode('utf-8'))
     if not data.get('success'):
         raise Exception(f"API error: {data.get('error', 'Unknown error')}")
     billing = data.get('metadata', {}).get('billing', {})
-    return data['data']['download_url'], data['data']['size_gb'], billing
+    return data['data']['download_url'], data['data']['size_gb'], billing, data['data'].get('object_key', object_key)
 
 
 def _get_gcs_client(gcs_credentials):
@@ -27,15 +37,9 @@ def _get_gcs_client(gcs_credentials):
 
 
 def _transfer_dataset(client, bucket, dataset, prefix=None, retry_errors=3):
-    dataset_name = DATASET_NAME_MAP.get(dataset)
-    if not dataset_name:
-        return {'success': False, 'dataset': dataset, 'error': f"Unknown dataset: {dataset}"}
+    download_url, size_gb, billing, object_key = _get_dataset_url(dataset)
 
-    download_url, size_gb, billing = _get_dataset_url(dataset_name)
-
-    parsed = urllib.parse.urlparse(download_url)
-    path = urllib.parse.parse_qs(parsed.query).get('path', [''])[0]
-    key = urllib.parse.unquote(path.split('/')[-1]) or f"{dataset}.download"
+    key = object_key.strip("/") or f"{dataset}.download"
     if prefix:
         key = f"{prefix.rstrip('/')}/{key}"
 
@@ -54,7 +58,7 @@ def _transfer_dataset(client, bucket, dataset, prefix=None, retry_errors=3):
                 return {'success': True, 'dataset': dataset, 'size_bytes': blob.size, 'billing': billing}
         except Exception as e:
             if attempt < retry_errors:
-                download_url, _, _ = _get_dataset_url(dataset_name)
+                download_url, _, _, _ = _get_dataset_url(dataset)
             last_error = e
 
     return {'success': False, 'dataset': dataset, 'error': str(last_error)}

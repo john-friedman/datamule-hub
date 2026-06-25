@@ -1,4 +1,4 @@
-from datamulehub import download_dataset
+from datamulehub import datasets
 
 
-download_dataset(dataset='sec_accessions')
+datasets.download("simple_xbrl", filename="simple_xbrl.parquet")

@@ -1,4 +1,4 @@
-from datamulehub.object_transfer.s3.bucket_transfer import bucket_transfer
+from datamulehub import object_transfer
 
 s3_credentials = {
     's3_provider': 'aws',
@@ -8,7 +8,7 @@ s3_credentials = {
     'bucket_name': 'your-bucket'
 }
 
-bucket_transfer(
+object_transfer.s3_archive_transfer(
     datamule_bucket='sec_filings_sgml_r2',
     s3_credentials=s3_credentials,
     cik=320193,

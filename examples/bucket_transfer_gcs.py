@@ -1,4 +1,4 @@
-from datamulehub.object_transfer.gcs.bucket_transfer import bucket_transfer
+from datamulehub import object_transfer
 
 
 gcs_credentials = {
@@ -6,7 +6,7 @@ gcs_credentials = {
     'service_file': 'service_account.json' # Optional. Can also do (gcloud auth application-default login), in which case remove this.
 }
 
-bucket_transfer(
+object_transfer.gcs_archive_transfer(
     datamule_bucket='sec_filings_sgml_r2',
     gcs_credentials=gcs_credentials,
     cik=320193,

@@ -1,4 +1,4 @@
-from datamulehub.object_transfer.s3.datasets_transfer import datasets_transfer
+from datamulehub import object_transfer
 
 s3_credentials = {
     's3_provider': 'aws',
@@ -8,8 +8,8 @@ s3_credentials = {
     'bucket_name': 'your-bucket'
 }
 
-datasets_transfer(
-    datasets=['sec_accessions','sec_accession_cik_table'],
+object_transfer.s3_dataset_transfer(
+    datasets=['simple_xbrl', 'xml2tables/dos'],
     s3_credentials=s3_credentials,
     prefix = ""
 )

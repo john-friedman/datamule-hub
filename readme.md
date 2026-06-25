@@ -1,40 +1,63 @@
 # Datamule Hub
 
-Python package to use [datamule.xyz](https://datamule.xyz/) endpoints.
-
-> Currently moving over the cloud functionality from [datamule-python](https://github.com/john-friedman/datamule-python) to this repository, to keep datamule-python dependency light. 
+Python package for Datamule cloud APIs.
 
 ## Installation
 
-```
+```bash
 pip install datamule-hub
 ```
 
+Set your API key:
 
-## Functions
+```bash
+export DATAMULE_API_KEY="..."
+```
 
-Databases
-- query_database
+## Datasets
 
-Datasets
-- download_dataset
+```python
+from datamulehub import datasets
 
-Object Storage
-- bucket_transfer (transfer objects in a bucket to your cloud)
-- dataset_transfer (transfer datasets to your cloud)
+datasets.download("simple_xbrl")
+datasets.download("xml2tables/dos", filename="dos.parquet")
+datasets.download("metadata/submissions_metadata/data.parquet")
+```
 
-## Supported Providers
+Dataset downloads use the v3 S3-gated API.
 
-Current supported methods. Subject to change.
+## Athena Queries
 
-- AWS S3 via `aioboto3` — authenticate via [IAM access keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)
-- GCP Cloud Storage via `gcloud-aio-storage` — authenticate via service account JSON (`service_file`) or [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) (`gcloud auth application-default login`)
+Download query results as a folder of Parquet parts:
 
-## Quickstart
+```python
+from datamulehub import databases
 
-1. Set `DATAMULE_API_KEY` in your environment
-2. read [examples](examples/)
+result = databases.query(
+    "SELECT * FROM simple_xbrl LIMIT 10",
+    output_dir="simple_xbrl_sample",
+)
+print(result)
+```
 
-## Docs
+Read the full query result into Python rows:
 
-Tbd.
+```python
+from datamulehub import databases
+
+rows = databases.read_query("SELECT * FROM simple_xbrl LIMIT 10")
+print(rows[0])
+```
+
+## Archive Helpers
+
+```python
+from datamulehub import sec_filings_archive
+
+sec_filings_archive.download_sgml(cik=320193, submission_type="10-K", output_dir="out")
+sec_filings_archive.download_tar(cik=320193, document_type=["10-K", "10-Q"], output_dir="out")
+```
+
+## Object Transfer
+
+Object transfer helpers can copy Datamule results into your S3 or GCS bucket. See `examples/`.
