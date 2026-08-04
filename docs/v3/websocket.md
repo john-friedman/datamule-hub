@@ -26,3 +26,17 @@ for filing in sec_filings_notifications.stream_filings():
     if filing["submission_type"] == "10-K":
         print("10-K:", filing)
 ```
+
+`stream_filings()` reconnects automatically if the socket closes, the
+connection stops answering pings, or no filing/heartbeat messages are received
+for the idle timeout.
+
+```python
+for filing in sec_filings_notifications.stream_filings(
+    idle_timeout=300,
+    ping_interval=60,
+    ping_timeout=10,
+    recv_timeout=30,
+):
+    print(filing)
+```

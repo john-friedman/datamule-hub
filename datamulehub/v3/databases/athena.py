@@ -209,7 +209,7 @@ def read_query(sql, api_key=None, wait_seconds=None):
             output_dir=tmp_dir,
             api_key=api_key,
             wait_seconds=wait_seconds,
-            quiet=True,
+            quiet=False,
         )
         table = _read_result_table(result["output_dir"])
         return table.to_pylist()
