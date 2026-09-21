@@ -5,6 +5,7 @@ from .v3 import sec_filings_archive
 from .v3 import sec_filings_lookup
 from .v3 import sec_filings_notifications
 
+
 __all__ = [
     "databases",
     "datasets",

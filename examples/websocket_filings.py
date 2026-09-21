@@ -1,4 +1,9 @@
+import logging
+
 from datamulehub import sec_filings_notifications
+
+
+logging.basicConfig(level=logging.INFO)
 
 
 for filing in sec_filings_notifications.stream_filings(

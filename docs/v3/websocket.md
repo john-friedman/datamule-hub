@@ -40,3 +40,18 @@ for filing in sec_filings_notifications.stream_filings(
 ):
     print(filing)
 ```
+
+## Fastest filings
+
+The fastest filings stream charges $0.25 when it issues a service token. The
+package reuses that token for transport reconnects and requests another only
+after the token expires at the 05:00 UTC reset.
+
+```python
+from datamulehub import sec_filings_notifications
+
+for filing in sec_filings_notifications.stream_fastest_filings():
+    print(filing)
+```
+
+Events contain `accession`, `cik`, `detected_time`, and `detection_method`.

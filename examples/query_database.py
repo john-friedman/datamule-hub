@@ -1,4 +1,9 @@
+import logging
+
 from datamulehub import databases
+
+
+logging.basicConfig(level=logging.INFO)
 
 
 databases.query(

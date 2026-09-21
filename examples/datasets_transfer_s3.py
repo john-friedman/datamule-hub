@@ -1,4 +1,10 @@
+import logging
+
 from datamulehub import object_transfer
+
+
+logging.basicConfig(level=logging.INFO)
+
 
 s3_credentials = {
     's3_provider': 'aws',

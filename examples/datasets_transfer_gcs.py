@@ -1,4 +1,10 @@
+import logging
+
 from datamulehub import object_transfer
+
+
+logging.basicConfig(level=logging.INFO)
+
 
 gcs_credentials = {
     'bucket_name': 'your-bucket',
