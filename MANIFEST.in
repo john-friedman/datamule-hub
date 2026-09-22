@@ -1,0 +1,2 @@
+recursive-include rust/archive-downloader Cargo.toml Cargo.lock *.rs
+prune rust/archive-downloader/target

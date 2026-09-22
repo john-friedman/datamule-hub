@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import logging
 import re
 import tarfile
@@ -12,6 +13,7 @@ from tqdm.asyncio import tqdm
 
 from ...utils.format_accession import format_accession
 from ..sec_filings_lookup import stream_sgml, stream_tar
+from . import _rust
 from .utils import (
     DownloadItem,
     TarBatchWriter,
@@ -30,7 +32,13 @@ logger = logging.getLogger(__name__)
 
 
 def _is_document_mode(document_type, filename, sequence) -> bool:
-    return document_type is not None or filename is not None or sequence is not None
+    return not _is_metadata_mode(document_type) and (
+        document_type is not None or filename is not None or sequence is not None
+    )
+
+
+def _is_metadata_mode(document_type) -> bool:
+    return isinstance(document_type, str) and document_type.lower() == "metadata"
 
 
 def _parse_content_range(value: str) -> tuple[int, int]:
@@ -142,6 +150,86 @@ def _logical_document_path(filing_date, accession_nd: str, filename: str, decomp
     if not decompress:
         name = f"{name}.zst"
     return Path(str(filing_date)) / accession_nd / name
+
+
+def _parse_metadata_header(header: bytes) -> int:
+    if len(header) != 512:
+        raise RuntimeError(
+            f"Expected a 512-byte TAR header for metadata.json, got {len(header)} bytes."
+        )
+
+    try:
+        member = tarfile.TarInfo.frombuf(
+            header,
+            encoding="utf-8",
+            errors="surrogateescape",
+        )
+    except (tarfile.TarError, ValueError) as exc:
+        raise RuntimeError("Invalid TAR header while reading metadata.json.") from exc
+
+    if not member.isfile() or Path(member.name).name != "metadata.json":
+        raise RuntimeError(
+            f"Expected metadata.json as the first TAR member, got: {member.name!r}"
+        )
+    return member.size
+
+
+async def _download_range(
+    session,
+    url: str,
+    start: int,
+    end: int,
+    semaphore: asyncio.Semaphore,
+) -> bytes:
+    headers = {"Range": f"bytes={start}-{end - 1}"}
+    async with semaphore:
+        async with session.get(url, headers=headers) as response:
+            response.raise_for_status()
+            content = await response.read()
+            parts = _parse_range_response(
+                response.status,
+                response.url,
+                response.headers,
+                content,
+                1,
+            )
+
+    expected_range = (start, end)
+    if set(parts) != {expected_range}:
+        raise RuntimeError(
+            f"Range response did not match request for {url}: "
+            f"expected={expected_range} returned={sorted(parts)}"
+        )
+    return parts[expected_range]
+
+
+async def _download_metadata_json(
+    session,
+    tar_url: str,
+    filing_date,
+    accession_nd: str,
+    semaphore: asyncio.Semaphore,
+) -> DownloadItem:
+    header = await _download_range(session, tar_url, 0, 512, semaphore)
+    metadata_size = _parse_metadata_header(header)
+    if metadata_size:
+        data = await _download_range(
+            session,
+            tar_url,
+            512,
+            512 + metadata_size,
+            semaphore,
+        )
+    else:
+        data = b""
+
+    try:
+        json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"Invalid metadata.json returned by {tar_url}.") from exc
+
+    logical_path = Path(str(filing_date)) / accession_nd / "metadata.json"
+    return DownloadItem(logical_path=logical_path, data=data)
 
 
 def _extract_submission_items(
@@ -376,6 +464,53 @@ async def _process_submissions(
     return paths
 
 
+async def _process_metadata(
+    rows: list[tuple],
+    session_factory,
+    semaphore: asyncio.Semaphore,
+    pbar,
+    tar_writer: Optional[TarBatchWriter],
+    output_dir: Path,
+) -> list[Path]:
+    seen = set()
+    submissions = []
+    for filing_date, accession in rows:
+        accession_nd = format_accession(accession, "no-dash")
+        key = (filing_date, accession_nd)
+        if key in seen:
+            continue
+        seen.add(key)
+        submissions.append(key)
+
+    paths: list[Path] = []
+    async with session_factory() as session:
+        tasks = [
+            _download_metadata_json(
+                session=session,
+                tar_url=f"{BASE_URL}/{filing_date}/{accession_nd}.tar",
+                filing_date=filing_date,
+                accession_nd=accession_nd,
+                semaphore=semaphore,
+            )
+            for filing_date, accession_nd in submissions
+        ]
+
+        for coro in asyncio.as_completed(tasks):
+            try:
+                item = await coro
+                paths.append(store_item(output_dir, item, tar_writer))
+            except Exception as exc:
+                logger.error(
+                    "Metadata download failed: %s: %r",
+                    type(exc).__name__,
+                    exc,
+                )
+            finally:
+                pbar.update(1)
+
+    return paths
+
+
 def _make_http_client(aiohttp, max_workers: int):
     return aiohttp.ClientSession(
         connector=aiohttp.TCPConnector(limit=max_workers, ttl_dns_cache=300),
@@ -418,7 +553,33 @@ def download_tar(
 
     Queries without document_type, filename, or sequence download whole matching
     submission TARs. Document-level filters use exact byte-range downloads.
+
+    Set document_type="metadata" to download only each matching filing's
+    metadata.json using exact byte-range requests.
     """
+    if _rust.available():
+        return _download_tar_rust(
+            cik=cik,
+            accession=accession,
+            submission_type=submission_type,
+            filing_date=filing_date,
+            report_date=report_date,
+            detected_time=detected_time,
+            contains_xbrl=contains_xbrl,
+            document_type=document_type,
+            filename=filename,
+            sequence=sequence,
+            api_key=api_key,
+            page=page,
+            page_size=page_size,
+            output_dir=Path(output_dir),
+            max_workers=max_workers,
+            decomp_workers=decomp_workers,
+            decompress=decompress,
+            tar_max_size_mb=tar_max_size_mb,
+            overwrite=overwrite,
+        )
+
     return asyncio.run(
         _download_tar_async(
             cik=cik,
@@ -442,6 +603,89 @@ def download_tar(
             overwrite=overwrite,
         )
     )
+
+
+def _download_tar_rust(
+    output_dir: Path,
+    max_workers: int,
+    decomp_workers: int,
+    decompress: bool,
+    tar_max_size_mb: Optional[Union[int, float]],
+    overwrite: bool,
+    **stream_kwargs,
+):
+    validate_tar_max_size_mb(tar_max_size_mb)
+    if max_workers <= 0:
+        raise ValueError("max_workers must be a positive integer.")
+    if decomp_workers <= 0:
+        raise ValueError("decomp_workers must be a positive integer.")
+    prepare_output_dir(output_dir, overwrite=overwrite)
+
+    metadata_mode = _is_metadata_mode(stream_kwargs.get("document_type"))
+    document_mode = _is_document_mode(
+        stream_kwargs.get("document_type"),
+        stream_kwargs.get("filename"),
+        stream_kwargs.get("sequence"),
+    )
+
+    def jobs():
+        if metadata_mode:
+            lookup_kwargs = {**stream_kwargs, "document_type": None}
+            lookup_pages = stream_sgml(**lookup_kwargs)
+        elif document_mode:
+            lookup_pages = stream_tar(**stream_kwargs)
+        else:
+            lookup_pages = stream_sgml(**stream_kwargs)
+
+        for lookup_page in lookup_pages:
+            if document_mode:
+                rows = zip(
+                    lookup_page["filingDate"],
+                    lookup_page["accession"],
+                    lookup_page["filename"],
+                    lookup_page["start"],
+                    lookup_page["end"],
+                )
+                for filing_date, accession, filename, start, end in rows:
+                    yield {
+                        "filingDate": str(filing_date),
+                        "accession": format_accession(accession, "no-dash"),
+                        "filename": filename,
+                        "start": int(start),
+                        "end": int(end),
+                    }
+            else:
+                seen = set()
+                rows = zip(lookup_page["filingDate"], lookup_page["accession"])
+                for filing_date, accession in rows:
+                    accession_nd = format_accession(accession, "no-dash")
+                    key = (str(filing_date), accession_nd)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    yield {
+                        "filingDate": key[0],
+                        "accession": key[1],
+                    }
+
+    mode = "metadata" if metadata_mode else "range" if document_mode else "submission"
+
+    downloaded = _rust.run(
+        mode=mode,
+        jobs=jobs(),
+        output_dir=output_dir,
+        max_workers=max_workers,
+        decomp_workers=decomp_workers,
+        decompress=decompress,
+        tar_max_size_mb=tar_max_size_mb,
+        description="Downloading TAR filings",
+        logger=logger,
+    )
+    logger.info(
+        "TAR archive download complete: files=%s output_dir=%s",
+        len(downloaded), output_dir,
+    )
+    return downloaded
 
 
 async def _download_tar_async(
@@ -473,6 +717,7 @@ async def _download_tar_async(
     downloaded: list[Path] = []
     tar_writer = TarBatchWriter(output_dir, tar_max_size_mb) if tar_max_size_mb is not None else None
 
+    metadata_mode = _is_metadata_mode(stream_kwargs.get("document_type"))
     try:
         session_factory = lambda: _make_http_client(aiohttp, max_workers)
 
@@ -482,13 +727,35 @@ async def _download_tar_async(
             with tqdm(total=0, desc="Downloading TAR filings",
                       unit="file") as pbar:
 
-                if document_mode:
+                if metadata_mode:
+                    metadata_lookup_kwargs = {
+                        **stream_kwargs,
+                        "document_type": None,
+                    }
+                    lookup_pages = stream_sgml(**metadata_lookup_kwargs)
+                elif document_mode:
                     lookup_pages = stream_tar(**stream_kwargs)
                 else:
                     lookup_pages = stream_sgml(**stream_kwargs)
 
                 for lookup_page in lookup_pages:
-                    if document_mode:
+                    if metadata_mode:
+                        rows = list(zip(
+                            lookup_page["filingDate"],
+                            lookup_page["accession"],
+                        ))
+                        pbar.total += len(rows)
+                        pbar.refresh()
+
+                        batch_paths = await _process_metadata(
+                            rows=rows,
+                            session_factory=session_factory,
+                            semaphore=semaphore,
+                            pbar=pbar,
+                            tar_writer=tar_writer,
+                            output_dir=output_dir,
+                        )
+                    elif document_mode:
                         rows = list(zip(
                             lookup_page["filingDate"],
                             lookup_page["accession"],

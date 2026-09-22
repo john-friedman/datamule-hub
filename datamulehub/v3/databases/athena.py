@@ -10,6 +10,11 @@ from pathlib import Path
 from tqdm import tqdm
 
 from ...api_key import get_api_key
+from .fastest import (
+    download_fastest_metadata_query,
+    is_fastest_metadata_query,
+    read_fastest_metadata_query,
+)
 
 
 API_BASE_URL = "https://api.datamule.xyz"
@@ -87,6 +92,14 @@ def _extract_result_files(download_path, output_dir):
 
 
 def query(sql, output_dir=None, api_key=None, wait_seconds=None, chunk_size=1024 * 1024, quiet=False):
+    if is_fastest_metadata_query(sql):
+        return download_fastest_metadata_query(
+            sql,
+            output_dir=output_dir,
+            api_key=api_key,
+            quiet=quiet,
+        )
+
     key = get_api_key(api_key)
     body = {"query": sql}
     if wait_seconds is not None:
@@ -203,6 +216,9 @@ def _read_result_table(path):
 
 
 def read_query(sql, api_key=None, wait_seconds=None):
+    if is_fastest_metadata_query(sql):
+        return read_fastest_metadata_query(sql, api_key=api_key)
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         result = query(
             sql,

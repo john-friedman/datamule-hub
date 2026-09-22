@@ -23,6 +23,9 @@ env/
 .coverage
 htmlcov/
 
+# Rust build output
+target/
+
 # Jupyter
 .ipynb_checkpoints/
 

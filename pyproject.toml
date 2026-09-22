@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.cibuildwheel]
+build = "cp311-*"
+skip = ["*-musllinux*", "*-manylinux_i686", "*-win32"]
+
+[tool.cibuildwheel.linux]
+before-all = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
+environment = { PATH = "$HOME/.cargo/bin:$PATH" }
+environment-pass = ["DATAMULE_VERSION"]
+manylinux-x86_64-image = "manylinux2014"

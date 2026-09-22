@@ -8,6 +8,7 @@ from tqdm.asyncio import tqdm
 
 from ...utils.format_accession import format_accession
 from ..sec_filings_lookup import stream_sgml
+from . import _rust
 from .utils import (
     DownloadItem,
     TarBatchWriter,
@@ -121,6 +122,29 @@ def download_sgml(
 
     Uses async HTTP, optional zstd decompression, and optional local tar batching.
     """
+    if _rust.available():
+        return _download_sgml_rust(
+            cik=cik,
+            accession=accession,
+            submission_type=submission_type,
+            filing_date=filing_date,
+            report_date=report_date,
+            detected_time=detected_time,
+            contains_xbrl=contains_xbrl,
+            document_type=document_type,
+            filename=filename,
+            sequence=sequence,
+            api_key=api_key,
+            page=page,
+            page_size=page_size,
+            output_dir=Path(output_dir),
+            max_workers=max_workers,
+            decomp_workers=decomp_workers,
+            decompress=decompress,
+            tar_max_size_mb=tar_max_size_mb,
+            overwrite=overwrite,
+        )
+
     return asyncio.run(
         _download_sgml_async(
             cik=cik,
@@ -144,6 +168,51 @@ def download_sgml(
             overwrite=overwrite,
         )
     )
+
+
+def _download_sgml_rust(
+    output_dir: Path,
+    max_workers: int,
+    decomp_workers: int,
+    decompress: bool,
+    tar_max_size_mb: Optional[Union[int, float]],
+    overwrite: bool,
+    **stream_kwargs,
+):
+    validate_tar_max_size_mb(tar_max_size_mb)
+    if max_workers <= 0:
+        raise ValueError("max_workers must be a positive integer.")
+    if decomp_workers <= 0:
+        raise ValueError("decomp_workers must be a positive integer.")
+    prepare_output_dir(output_dir, overwrite=overwrite)
+
+    def jobs():
+        for lookup_page in stream_sgml(**stream_kwargs):
+            for filing_date, accession in zip(
+                lookup_page["filingDate"],
+                lookup_page["accession"],
+            ):
+                yield {
+                    "filingDate": str(filing_date),
+                    "accession": format_accession(accession, "no-dash"),
+                }
+
+    downloaded = _rust.run(
+        mode="sgml",
+        jobs=jobs(),
+        output_dir=output_dir,
+        max_workers=max_workers,
+        decomp_workers=decomp_workers,
+        decompress=decompress,
+        tar_max_size_mb=tar_max_size_mb,
+        description="Downloading SGML filings",
+        logger=logger,
+    )
+    logger.info(
+        "SGML archive download complete: files=%s output_dir=%s",
+        len(downloaded), output_dir,
+    )
+    return downloaded
 
 
 async def _download_sgml_async(
