@@ -28,8 +28,11 @@ def find_binary():
     return None
 
 
-def available():
-    return find_binary() is not None
+def require_binary():
+    binary = find_binary()
+    if binary is None:
+        raise RuntimeError("The datamule Rust archive downloader is not installed.")
+    return binary
 
 
 def run(
@@ -44,9 +47,7 @@ def run(
     logger=None,
 ):
     logger = logger or logging.getLogger(__name__)
-    binary = find_binary()
-    if binary is None:
-        raise RuntimeError("The datamule Rust archive downloader is not installed.")
+    binary = require_binary()
 
     manifest_path = None
     try:

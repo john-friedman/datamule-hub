@@ -1,5 +1,9 @@
 # SEC Filings Archive
 
+Both download functions require the Rust archive downloader. Wheels include its
+executable. When importing this repository directly, build it first with
+`cargo build --release --manifest-path rust/archive-downloader/Cargo.toml`.
+
 
 ## Usage 
 ```python

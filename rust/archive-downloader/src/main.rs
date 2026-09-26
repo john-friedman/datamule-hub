@@ -157,6 +157,16 @@ fn file_name(value: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("invalid archive filename: {value:?}"))
 }
 
+fn document_output_name(name: &str, decompress: bool) -> String {
+    if decompress {
+        name.strip_suffix(".zst").unwrap_or(name).to_owned()
+    } else if name.ends_with(".zst") {
+        name.to_owned()
+    } else {
+        format!("{name}.zst")
+    }
+}
+
 fn tar_url(job: &Job) -> String {
     format!("{TAR_BASE_URL}/{}/{}.tar", job.filing_date, job.accession)
 }
@@ -265,11 +275,11 @@ fn extract_submission(job: Job, tar_bytes: Vec<u8>, decompress: bool) -> Result<
 
         let output_name = if member_name == "metadata.json" {
             member_name
-        } else if decompress {
-            data = decode_zstd(data)?;
-            member_name
         } else {
-            format!("{member_name}.zst")
+            if decompress {
+                data = decode_zstd(data)?;
+            }
+            document_output_name(&member_name, decompress)
         };
         output.push(DownloadItem {
             logical_path: PathBuf::from(&job.filing_date)
@@ -335,12 +345,10 @@ async fn process_job(
                 .as_deref()
                 .ok_or_else(|| anyhow!("range job is missing filename"))?;
             let mut data = get_range(&client, &url, start, end).await?;
-            let output_name = if decompress {
+            if decompress {
                 data = run_blocking(cpu, move || decode_zstd(data)).await?;
-                file_name(source_name)?
-            } else {
-                format!("{}.zst", file_name(source_name)?)
-            };
+            }
+            let output_name = document_output_name(&file_name(source_name)?, decompress);
             Ok(vec![DownloadItem {
                 logical_path: PathBuf::from(job.filing_date)
                     .join(job.accession)
@@ -464,4 +472,60 @@ async fn main() -> Result<()> {
 
     sink.finish()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn append_member(builder: &mut tar::Builder<Vec<u8>>, name: &str, data: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, name, data).unwrap();
+    }
+
+    #[test]
+    fn submission_names_match_document_bytes() {
+        let compressed = zstd::stream::encode_all(Cursor::new(b"<html>ok</html>"), 0).unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        append_member(&mut builder, "metadata.json", b"{}");
+        append_member(&mut builder, "report.htm.zst", &compressed);
+        builder.finish().unwrap();
+        let source = builder.into_inner().unwrap();
+        let job = Job {
+            filing_date: "2024-11-13".to_owned(),
+            accession: "000182912624007459".to_owned(),
+            filename: None,
+            start: None,
+            end: None,
+        };
+
+        let decoded = extract_submission(job.clone(), source.clone(), true).unwrap();
+        assert_eq!(
+            decoded[0].logical_path.file_name().unwrap(),
+            "metadata.json"
+        );
+        assert_eq!(decoded[0].data, b"{}");
+        assert_eq!(decoded[1].logical_path.file_name().unwrap(), "report.htm");
+        assert_eq!(decoded[1].data, b"<html>ok</html>");
+
+        let encoded = extract_submission(job, source, false).unwrap();
+        assert_eq!(
+            encoded[1].logical_path.file_name().unwrap(),
+            "report.htm.zst"
+        );
+        assert_eq!(encoded[1].data, compressed);
+    }
+
+    #[test]
+    fn document_names_accept_sources_without_compression_suffix() {
+        assert_eq!(document_output_name("report.htm", true), "report.htm");
+        assert_eq!(document_output_name("report.htm", false), "report.htm.zst");
+        assert_eq!(
+            document_output_name("report.htm.zst", false),
+            "report.htm.zst"
+        );
+    }
 }
