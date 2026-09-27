@@ -10,8 +10,6 @@ from ...api_key import get_api_key
 
 API_URL = "https://api.datamule.xyz/v3/fastest-sec-filings-metadata"
 TABLE_NAME = "fastest_sec_filings_metadata"
-DEFAULT_LIMIT = 1000
-MAX_LIMIT = 1000
 FIELDS = (
     "accession",
     "ciks",
@@ -91,7 +89,10 @@ def _parse_query(sql):
         )
 
     columns = _parse_columns(match.group("columns"))
-    params = {"limit": _parse_limit(match.group("limit"))}
+    params = {}
+    limit = _parse_limit(match.group("limit"))
+    if limit is not None:
+        params["limit"] = limit
     order = _parse_order(match.group("order_field"), match.group("order"))
     if order is not None:
         params["order"] = order
@@ -143,10 +144,10 @@ def _parse_columns(value):
 
 def _parse_limit(value):
     if value is None:
-        return DEFAULT_LIMIT
+        return None
     limit = int(value)
-    if not 1 <= limit <= MAX_LIMIT:
-        raise ValueError(f"LIMIT must be between 1 and {MAX_LIMIT}.")
+    if limit < 1:
+        raise ValueError("LIMIT must be a positive integer.")
     return limit
 
 
