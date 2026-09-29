@@ -41,7 +41,7 @@ class PlatformWheel(bdist_wheel):
 setup(
     name="datamule-hub",
     author="John Friedman",
-    version=os.environ.get("DATAMULE_VERSION", "0.2.7"),
+    version=os.environ.get("DATAMULE_VERSION", "0.2.12"),
     description="Access Datamule cloud",
     url="https://github.com/john-friedman/datamule-hub",
     packages=find_packages(),
@@ -59,6 +59,7 @@ setup(
         "google-auth",
         "google-cloud-storage",
         "pyarrow",
-        "websocket-client"
+        "websocket-client",
+        "tzdata; platform_system == 'Windows'",
     ],
 )

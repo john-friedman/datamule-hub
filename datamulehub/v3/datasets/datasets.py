@@ -3,22 +3,23 @@ import os
 import tempfile
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from email.message import Message
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from tqdm import tqdm
 
 from ...api_key import get_api_key
 from ...utils.format_accession import format_accession
+from ..sec_filings_lookup import stream_sgml
+from .document_types import DOCUMENT_TYPES_BY_TABLE
 
 
 API_BASE_URL = "https://api.datamule.xyz"
 LIVE_RETRY_SECONDS = 3
-LOOKUP_OVERLAP_SECONDS = 300
 LIVE_DOWNLOAD_WORKERS = 32
 
 DATASET_PATH_MAP = {
@@ -178,56 +179,42 @@ def _snapshot_keys(path, table, candidates):
     if "_sourceKey" in fields:
         for batch in parquet.iter_batches(columns=["_sourceKey"], batch_size=65536):
             candidates.difference_update(value for value in batch.column(0).to_pylist() if value)
-    elif "filingDate" in fields and "accessionNumber" in fields:
+    if candidates and "filingDate" in fields and "accessionNumber" in fields:
         for batch in parquet.iter_batches(columns=["filingDate", "accessionNumber"], batch_size=65536):
             dates = batch.column(0).to_pylist()
             accessions = batch.column(1).to_pylist()
             for filing_date, accession in zip(dates, accessions):
+                if filing_date is None or accession is None:
+                    continue
                 key = f"sec-filings/xml2tables/{filing_date}/{table}/{format_accession(accession, 'no-dash')}.parquet"
                 candidates.discard(key)
     return candidates
 
 
-def _recent_xml_keys(table, snapshot_last_modified, api_key):
-    if snapshot_last_modified is None:
-        raise ValueError("Dataset link did not include last_modified; deploy the updated download link service")
+def _xml_keys_for_date(table, filing_date, api_key):
+    document_types = DOCUMENT_TYPES_BY_TABLE.get(table)
+    if document_types is None:
+        raise ValueError(f"Unknown XML table: {table}")
 
-    start = datetime.fromtimestamp(int(snapshot_last_modified) - LOOKUP_OVERLAP_SECONDS, timezone.utc)
-    end = datetime.now(timezone.utc) + timedelta(minutes=1)
     keys = set()
-    page = 1
-    while True:
-        params = urllib.parse.urlencode({
-            "table": table,
-            "detectedTime_START": start.strftime("%Y-%m-%d %H:%M:%S"),
-            "detectedTime_END": end.strftime("%Y-%m-%d %H:%M:%S"),
-            "page": page,
-        })
-        request = urllib.request.Request(
-            f"{API_BASE_URL}/v3/xml2tables/candidates?{params}",
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {get_api_key(api_key)}",
-                "User-Agent": "datamule-hub",
-            },
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(request) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            raise _api_error(exc) from exc
-        if not payload.get("success"):
-            raise Exception(f"API request failed: {payload.get('error')}")
-
-        data = payload.get("data", {})
-        for filing_date, accession in zip(data.get("filingDate", []), data.get("accession", [])):
+    for data in stream_sgml(
+        document_type=document_types,
+        filing_date=filing_date,
+        api_key=api_key,
+    ):
+        for accession in data.get("accession", []):
             accession = format_accession(accession, "no-dash")
             keys.add(f"sec-filings/xml2tables/{filing_date}/{table}/{accession}.parquet")
-        if not payload.get("metadata", {}).get("pagination", {}).get("hasMore"):
-            break
-        page += 1
     return keys
+
+
+def _express_filing_date(et_now):
+    minutes = et_now.hour * 60 + et_now.minute
+    if minutes < 150:
+        return (et_now.date() - timedelta(days=1)).isoformat()
+    if minutes < 390:
+        return None
+    return et_now.date().isoformat()
 
 
 def _live_link(key, api_key):
@@ -254,12 +241,38 @@ def _download_live_file(index, key, directory, api_key, chunk_size):
     return path, key, link
 
 
-def _merge_parquet(snapshot_path, additions, output_path):
+def _download_express_files(candidates, directory, api_key, chunk_size):
+    additions = []
+    links = []
+    if not candidates:
+        return additions, links
+
+    with ThreadPoolExecutor(max_workers=LIVE_DOWNLOAD_WORKERS) as executor:
+        futures = [
+            executor.submit(_download_live_file, index, key, directory, api_key, chunk_size)
+            for index, key in enumerate(sorted(candidates))
+        ]
+        with tqdm(total=len(futures), desc="Express filings", unit="filing") as progress:
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    path, key, link = result
+                    additions.append((path, key))
+                    links.append(link)
+                progress.set_postfix_str(
+                    f"{len(additions)}/{len(futures)} downloaded from Express", refresh=False
+                )
+                progress.update(1)
+    additions.sort(key=lambda item: item[1])
+    return additions, links
+
+
+def _merge_parquet(sources, output_path):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     fields = {}
-    for path, _key in [(snapshot_path, None), *additions]:
+    for path, _key in sources:
         for field in pq.read_schema(path):
             existing = fields.get(field.name)
             if existing is not None and existing.type != field.type:
@@ -269,7 +282,7 @@ def _merge_parquet(snapshot_path, additions, output_path):
     schema = pa.schema([field.with_nullable(True) for field in fields.values()])
 
     with pq.ParquetWriter(output_path, schema, compression="zstd") as writer:
-        for path, key in [(snapshot_path, None), *additions]:
+        for path, key in sources:
             parquet = pq.ParquetFile(path)
             for batch in parquet.iter_batches(batch_size=65536):
                 columns = {}
@@ -284,42 +297,57 @@ def _merge_parquet(snapshot_path, additions, output_path):
                 writer.write_batch(pa.RecordBatch.from_arrays(arrays, schema=schema))
 
 
-def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, include_current_day=True):
-    link = get_link(dataset, api_key=api_key)
-    output = filename or _filename_from_path(link["object_key"])
-    table = _xml_table_name(link["object_key"]) if include_current_day else None
+def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_storage="both"):
+    if from_storage not in ("both", "express", "standard"):
+        raise ValueError("from_storage must be 'both', 'express', or 'standard'")
 
-    if table is None:
-        output = _download_link(link, output, chunk_size, accept_filename=filename is None)
-        links = [link]
-    else:
-        output_path = Path(output).resolve()
-        with tempfile.TemporaryDirectory(dir=output_path.parent) as directory:
-            snapshot_path = Path(directory) / "snapshot.parquet"
-            _download_link(link, snapshot_path, chunk_size)
-            candidates = _recent_xml_keys(table, link.get("last_modified"), api_key)
-            _snapshot_keys(snapshot_path, table, candidates)
-            additions = []
-            links = [link]
-            with ThreadPoolExecutor(max_workers=LIVE_DOWNLOAD_WORKERS) as executor:
-                futures = [
-                    executor.submit(_download_live_file, index, key, directory, api_key, chunk_size)
-                    for index, key in enumerate(sorted(candidates))
-                ]
-                for future in as_completed(futures):
-                    result = future.result()
-                    if result is None:
-                        continue
-                    path, key, live_link = result
-                    additions.append((path, key))
-                    links.append(live_link)
-            if additions:
-                additions.sort(key=lambda item: item[1])
-                merged_path = Path(directory) / "merged.parquet"
-                _merge_parquet(snapshot_path, additions, merged_path)
-                os.replace(merged_path, output_path)
-            else:
-                os.replace(snapshot_path, output_path)
+    object_key = resolve_path(dataset)
+    table = _xml_table_name(object_key)
+    if from_storage == "express" and table is None:
+        raise ValueError("from_storage='express' requires an XML table dataset")
+
+    et_now = datetime.now().astimezone(ZoneInfo("America/New_York")) if table else None
+    filing_date = _express_filing_date(et_now) if et_now and from_storage != "standard" else None
+    include_daily = from_storage != "express"
+    lookup_executor = ThreadPoolExecutor(max_workers=1) if include_daily and filing_date else None
+    try:
+        lookup_future = (
+            lookup_executor.submit(_xml_keys_for_date, table, filing_date, api_key)
+            if lookup_executor else None
+        )
+        link = get_link(object_key, api_key=api_key) if include_daily else None
+        output = filename or _filename_from_path(link["object_key"] if link else object_key)
+        links = [link] if link else []
+
+        if include_daily and filing_date is None:
+            output = _download_link(link, output, chunk_size, accept_filename=filename is None)
+        else:
+            output_path = Path(output).resolve()
+            with tempfile.TemporaryDirectory(dir=output_path.parent) as directory:
+                snapshot_path = None
+                if link:
+                    snapshot_path = Path(directory) / "snapshot.parquet"
+                    _download_link(link, snapshot_path, chunk_size)
+                if lookup_future:
+                    candidates = lookup_future.result()
+                elif filing_date:
+                    candidates = _xml_keys_for_date(table, filing_date, api_key)
+                else:
+                    candidates = set()
+                if snapshot_path:
+                    _snapshot_keys(snapshot_path, table, candidates)
+                additions, express_links = _download_express_files(candidates, directory, api_key, chunk_size)
+                links.extend(express_links)
+                if snapshot_path and not additions:
+                    os.replace(snapshot_path, output_path)
+                else:
+                    sources = ([(snapshot_path, None)] if snapshot_path else []) + additions
+                    merged_path = Path(directory) / "merged.parquet"
+                    _merge_parquet(sources, merged_path)
+                    os.replace(merged_path, output_path)
+    finally:
+        if lookup_executor:
+            lookup_executor.shutdown(wait=True)
 
     cost = sum(item.get("billing", {}).get("total_charge", 0) or 0 for item in links)
     balances = [
@@ -328,7 +356,7 @@ def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, inclu
         if item.get("billing", {}).get("remaining_balance") is not None
     ]
     remaining = min(balances) if balances else None
-    billing = link.get("billing", {})
+    billing = links[0].get("billing", {}) if links else {}
     billing = {**billing, "total_charge": cost, "remaining_balance": remaining}
     print(f"Downloaded to {output}")
     if remaining is not None:
@@ -336,7 +364,7 @@ def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, inclu
 
     return {
         "filename": output,
-        "object_key": link["object_key"],
+        "object_key": link["object_key"] if link else object_key,
         "size_bytes": os.path.getsize(output),
         "size_gb": os.path.getsize(output) / 1000000000,
         "cost": cost,
