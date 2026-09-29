@@ -284,15 +284,14 @@ def _merge_parquet(snapshot_path, additions, output_path):
                 writer.write_batch(pa.RecordBatch.from_arrays(arrays, schema=schema))
 
 
-def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, include_live=True):
+def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, include_current_day=True):
     link = get_link(dataset, api_key=api_key)
     output = filename or _filename_from_path(link["object_key"])
-    table = _xml_table_name(link["object_key"]) if include_live else None
+    table = _xml_table_name(link["object_key"]) if include_current_day else None
 
     if table is None:
         output = _download_link(link, output, chunk_size, accept_filename=filename is None)
         links = [link]
-        live_files = 0
     else:
         output_path = Path(output).resolve()
         with tempfile.TemporaryDirectory(dir=output_path.parent) as directory:
@@ -321,7 +320,6 @@ def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, inclu
                 os.replace(merged_path, output_path)
             else:
                 os.replace(snapshot_path, output_path)
-            live_files = len(additions)
 
     cost = sum(item.get("billing", {}).get("total_charge", 0) or 0 for item in links)
     balances = [
@@ -344,5 +342,4 @@ def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, inclu
         "cost": cost,
         "remaining_balance": remaining,
         "billing": billing,
-        "live_files": live_files,
     }
