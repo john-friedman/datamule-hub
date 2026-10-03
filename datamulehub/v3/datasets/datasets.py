@@ -4,7 +4,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from email.message import Message
 from pathlib import Path
@@ -19,8 +19,8 @@ from .document_types import DOCUMENT_TYPES_BY_TABLE
 
 
 API_BASE_URL = "https://api.datamule.xyz"
-LIVE_RETRY_SECONDS = 3
-LIVE_DOWNLOAD_WORKERS = 32
+DELTA_RETRY_SECONDS = 3
+DELTA_DOWNLOAD_WORKERS = 32
 
 DATASET_PATH_MAP = {
     "simple_xbrl": "datasets/simple_xbrl/data.parquet",
@@ -169,6 +169,13 @@ def _xml_table_name(object_key):
     return None
 
 
+def _source_key(table, filing_date, accession):
+    accession = format_accession(accession, "no-dash")
+    if table is None:
+        return f"sec-filings/simple_xbrl/{filing_date}/{accession}.parquet"
+    return f"sec-filings/xml2tables/{filing_date}/{table}/{accession}.parquet"
+
+
 def _snapshot_keys(path, table, candidates):
     import pyarrow.parquet as pq
 
@@ -186,29 +193,27 @@ def _snapshot_keys(path, table, candidates):
             for filing_date, accession in zip(dates, accessions):
                 if filing_date is None or accession is None:
                     continue
-                key = f"sec-filings/xml2tables/{filing_date}/{table}/{format_accession(accession, 'no-dash')}.parquet"
-                candidates.discard(key)
+                candidates.discard(_source_key(table, filing_date, accession))
     return candidates
 
 
-def _xml_keys_for_date(table, filing_date, api_key):
-    document_types = DOCUMENT_TYPES_BY_TABLE.get(table)
-    if document_types is None:
-        raise ValueError(f"Unknown XML table: {table}")
+def _delta_keys_for_date(table, filing_date, api_key):
+    if table is None:
+        filters = {"contains_xbrl": True}
+    else:
+        document_types = DOCUMENT_TYPES_BY_TABLE.get(table)
+        if document_types is None:
+            raise ValueError(f"Unknown XML table: {table}")
+        filters = {"document_type": document_types}
 
     keys = set()
-    for data in stream_sgml(
-        document_type=document_types,
-        filing_date=filing_date,
-        api_key=api_key,
-    ):
+    for data in stream_sgml(filing_date=filing_date, api_key=api_key, **filters):
         for accession in data.get("accession", []):
-            accession = format_accession(accession, "no-dash")
-            keys.add(f"sec-filings/xml2tables/{filing_date}/{table}/{accession}.parquet")
+            keys.add(_source_key(table, filing_date, accession))
     return keys
 
 
-def _express_filing_date(et_now):
+def _delta_filing_date(et_now):
     minutes = et_now.hour * 60 + et_now.minute
     if minutes < 150:
         return (et_now.date() - timedelta(days=1)).isoformat()
@@ -217,13 +222,13 @@ def _express_filing_date(et_now):
     return et_now.date().isoformat()
 
 
-def _live_link(key, api_key):
+def _delta_link(key, api_key):
     try:
         return get_link(key, api_key=api_key)
     except ApiError as exc:
         if exc.status != 404:
             raise
-    time.sleep(LIVE_RETRY_SECONDS)
+    time.sleep(DELTA_RETRY_SECONDS)
     try:
         return get_link(key, api_key=api_key)
     except ApiError as exc:
@@ -232,37 +237,73 @@ def _live_link(key, api_key):
         return None
 
 
-def _download_live_file(index, key, directory, api_key, chunk_size):
-    link = _live_link(key, api_key)
+def _download_delta_file(index, key, directory, api_key, chunk_size):
+    link = _delta_link(key, api_key)
     if link is None:
         return None
-    path = Path(directory) / f"live-{index}.parquet"
+    path = Path(directory) / f"delta-{index}.parquet"
     _download_link(link, path, chunk_size, quiet=True)
     return path, key, link
 
 
-def _download_express_files(candidates, directory, api_key, chunk_size):
+def _download_delta_files(candidates, directory, api_key, chunk_size):
     additions = []
     links = []
     if not candidates:
         return additions, links
 
-    with ThreadPoolExecutor(max_workers=LIVE_DOWNLOAD_WORKERS) as executor:
-        futures = [
-            executor.submit(_download_live_file, index, key, directory, api_key, chunk_size)
-            for index, key in enumerate(sorted(candidates))
-        ]
-        with tqdm(total=len(futures), desc="Express filings", unit="filing") as progress:
-            for future in as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    path, key, link = result
-                    additions.append((path, key))
-                    links.append(link)
-                progress.set_postfix_str(
-                    f"{len(additions)}/{len(futures)} downloaded from Express", refresh=False
-                )
-                progress.update(1)
+    keys = iter(enumerate(sorted(candidates)))
+    worker_count = min(DELTA_DOWNLOAD_WORKERS, len(candidates))
+    in_flight = {}
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        def submit_next():
+            try:
+                index, key = next(keys)
+            except StopIteration:
+                return False
+            future = executor.submit(_download_delta_file, index, key, directory, api_key, chunk_size)
+            in_flight[future] = key
+            return True
+
+        for _ in range(worker_count):
+            submit_next()
+
+        missing = 0
+        failed = 0
+        first_error = None
+        with tqdm(total=len(candidates), desc="Delta filings", unit="filing") as progress:
+            while in_flight:
+                done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                for future in done:
+                    key = in_flight.pop(future)
+                    try:
+                        result = future.result()
+                        if result is None:
+                            missing += 1
+                        else:
+                            path, _, link = result
+                            additions.append((path, key))
+                            links.append(link)
+                    except Exception as exc:
+                        failed += 1
+                        if first_error is None:
+                            first_error = exc
+                    finally:
+                        progress.set_postfix_str(
+                            f"{len(additions)} downloaded, {missing} missing, {failed} failed",
+                            refresh=False,
+                        )
+                        progress.update(1)
+
+                if first_error is None:
+                    while len(in_flight) < worker_count and submit_next():
+                        pass
+
+            if first_error is not None:
+                progress.refresh()
+                raise first_error
+
     additions.sort(key=lambda item: item[1])
     return additions, links
 
@@ -278,6 +319,8 @@ def _merge_parquet(sources, output_path):
             if existing is not None and existing.type != field.type:
                 raise ValueError(f"Column {field.name} has conflicting Parquet types")
             fields.setdefault(field.name, field)
+    if any(key and key.startswith("sec-filings/simple_xbrl/") for _, key in sources):
+        fields.setdefault("filingDate", pa.field("filingDate", pa.string()))
     fields.setdefault("_sourceKey", pa.field("_sourceKey", pa.string()))
     schema = pa.schema([field.with_nullable(True) for field in fields.values()])
 
@@ -290,6 +333,10 @@ def _merge_parquet(sources, output_path):
                     columns[name] = batch.column(batch.schema.get_field_index(name))
                 if key is not None:
                     columns["_sourceKey"] = pa.array([key] * batch.num_rows, type=pa.string())
+                    if "filingDate" in fields and "filingDate" not in columns:
+                        columns["filingDate"] = pa.array(
+                            [key.split("/")[2]] * batch.num_rows, type=pa.string()
+                        )
                 arrays = [
                     columns[field.name] if field.name in columns else pa.nulls(batch.num_rows, type=field.type)
                     for field in schema
@@ -298,21 +345,22 @@ def _merge_parquet(sources, output_path):
 
 
 def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_storage="both"):
-    if from_storage not in ("both", "express", "standard"):
-        raise ValueError("from_storage must be 'both', 'express', or 'standard'")
+    if from_storage not in ("both", "daily", "delta"):
+        raise ValueError("from_storage must be 'both', 'daily', or 'delta'")
 
     object_key = resolve_path(dataset)
     table = _xml_table_name(object_key)
-    if from_storage == "express" and table is None:
-        raise ValueError("from_storage='express' requires an XML table dataset")
+    has_delta = table is not None or object_key == DATASET_PATH_MAP["simple_xbrl"]
+    if from_storage == "delta" and not has_delta:
+        raise ValueError("from_storage='delta' requires an XML table or simple_xbrl dataset")
 
-    et_now = datetime.now().astimezone(ZoneInfo("America/New_York")) if table else None
-    filing_date = _express_filing_date(et_now) if et_now and from_storage != "standard" else None
-    include_daily = from_storage != "express"
+    et_now = datetime.now().astimezone(ZoneInfo("America/New_York")) if has_delta else None
+    filing_date = _delta_filing_date(et_now) if et_now and from_storage != "daily" else None
+    include_daily = from_storage != "delta"
     lookup_executor = ThreadPoolExecutor(max_workers=1) if include_daily and filing_date else None
     try:
         lookup_future = (
-            lookup_executor.submit(_xml_keys_for_date, table, filing_date, api_key)
+            lookup_executor.submit(_delta_keys_for_date, table, filing_date, api_key)
             if lookup_executor else None
         )
         link = get_link(object_key, api_key=api_key) if include_daily else None
@@ -331,13 +379,13 @@ def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_
                 if lookup_future:
                     candidates = lookup_future.result()
                 elif filing_date:
-                    candidates = _xml_keys_for_date(table, filing_date, api_key)
+                    candidates = _delta_keys_for_date(table, filing_date, api_key)
                 else:
                     candidates = set()
                 if snapshot_path:
                     _snapshot_keys(snapshot_path, table, candidates)
-                additions, express_links = _download_express_files(candidates, directory, api_key, chunk_size)
-                links.extend(express_links)
+                additions, delta_links = _download_delta_files(candidates, directory, api_key, chunk_size)
+                links.extend(delta_links)
                 if snapshot_path and not additions:
                     os.replace(snapshot_path, output_path)
                 else:

@@ -91,7 +91,7 @@ def _extract_result_files(download_path, output_dir):
     return files
 
 
-def query(sql, output_dir=None, api_key=None, wait_seconds=None, chunk_size=1024 * 1024, quiet=False):
+def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 * 1024, quiet=False):
     if is_fastest_metadata_query(sql):
         return download_fastest_metadata_query(
             sql,
@@ -215,7 +215,7 @@ def _read_result_table(path):
     return _read_parquet(path)
 
 
-def read_query(sql, api_key=None, wait_seconds=None):
+def read_query(sql, api_key=None, wait_seconds=600):
     if is_fastest_metadata_query(sql):
         return read_fastest_metadata_query(sql, api_key=api_key)
 

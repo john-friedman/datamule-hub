@@ -41,7 +41,7 @@ class PlatformWheel(bdist_wheel):
 setup(
     name="datamule-hub",
     author="John Friedman",
-    version=os.environ.get("DATAMULE_VERSION", "0.2.12"),
+    version="0.2.13",
     description="Access Datamule cloud",
     url="https://github.com/john-friedman/datamule-hub",
     packages=find_packages(),
