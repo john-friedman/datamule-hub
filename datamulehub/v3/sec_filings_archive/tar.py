@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from ...utils.format_accession import format_accession
+from ...utils.tickers import resolve_cik_filter
 from ..sec_filings_lookup import stream_sgml, stream_tar
 from . import _rust
 from .utils import prepare_output_dir, validate_tar_max_size_mb
@@ -43,6 +44,7 @@ def download_tar(
     decompress=True,
     tar_max_size_mb=512,
     overwrite=False,
+    ticker=None,
 ):
     """
     Download TAR document ranges.
@@ -57,6 +59,7 @@ def download_tar(
     Set document_type="metadata" to download only each matching filing's
     metadata.json using exact byte-range requests.
     """
+    cik = resolve_cik_filter(cik, ticker)
     return _download_tar_rust(
         cik=cik,
         accession=accession,

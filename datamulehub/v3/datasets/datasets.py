@@ -21,6 +21,7 @@ from .document_types import DOCUMENT_TYPES_BY_TABLE
 API_BASE_URL = "https://api.datamule.xyz"
 DELTA_RETRY_SECONDS = 3
 DELTA_DOWNLOAD_WORKERS = 32
+DELTA_REQUEST_TIMEOUT_SECONDS = 30
 
 DATASET_PATH_MAP = {
     "simple_xbrl": "datasets/simple_xbrl/data.parquet",
@@ -92,7 +93,13 @@ def _filename_from_path(path):
     return name or "dataset.parquet"
 
 
-def get_link(dataset, api_key=None):
+def _urlopen(request, timeout=None):
+    if timeout is None:
+        return urllib.request.urlopen(request)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def get_link(dataset, api_key=None, timeout=None):
     key = get_api_key(api_key)
     object_key = resolve_path(dataset)
     body = json.dumps({"path": object_key}).encode("utf-8")
@@ -109,7 +116,7 @@ def get_link(dataset, api_key=None):
     )
 
     try:
-        with urllib.request.urlopen(request) as response:
+        with _urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raise _api_error(exc) from exc
@@ -130,7 +137,7 @@ def get_link(dataset, api_key=None):
     }
 
 
-def _download_link(link, output, chunk_size, accept_filename=False, quiet=False):
+def _download_link(link, output, chunk_size, accept_filename=False, quiet=False, timeout=None):
     request = urllib.request.Request(
         link["download_url"],
         headers={"User-Agent": "datamule-hub"},
@@ -138,7 +145,7 @@ def _download_link(link, output, chunk_size, accept_filename=False, quiet=False)
     )
 
     try:
-        with urllib.request.urlopen(request) as response:
+        with _urlopen(request, timeout=timeout) as response:
             total_size = int(response.headers.get("Content-Length", 0))
             if accept_filename:
                 header_name = _content_disposition_filename(response.headers.get("Content-Disposition"))
@@ -224,13 +231,13 @@ def _delta_filing_date(et_now):
 
 def _delta_link(key, api_key):
     try:
-        return get_link(key, api_key=api_key)
+        return get_link(key, api_key=api_key, timeout=DELTA_REQUEST_TIMEOUT_SECONDS)
     except ApiError as exc:
         if exc.status != 404:
             raise
     time.sleep(DELTA_RETRY_SECONDS)
     try:
-        return get_link(key, api_key=api_key)
+        return get_link(key, api_key=api_key, timeout=DELTA_REQUEST_TIMEOUT_SECONDS)
     except ApiError as exc:
         if exc.status != 404:
             raise
@@ -242,7 +249,7 @@ def _download_delta_file(index, key, directory, api_key, chunk_size):
     if link is None:
         return None
     path = Path(directory) / f"delta-{index}.parquet"
-    _download_link(link, path, chunk_size, quiet=True)
+    _download_link(link, path, chunk_size, quiet=True, timeout=DELTA_REQUEST_TIMEOUT_SECONDS)
     return path, key, link
 
 

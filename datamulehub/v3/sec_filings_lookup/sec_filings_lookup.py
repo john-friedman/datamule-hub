@@ -6,6 +6,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from ...utils.tickers import resolve_cik_filter
+
 
 API_BASE_URL = "https://api.datamule.xyz/v3/sec-filings-lookup"
 DEFAULT_PAGE_SIZE = 25000
@@ -135,6 +137,7 @@ def _rows_returned(page_data):
 
 def _stream_lookup(endpoint, api_key=None, page=None, page_size=DEFAULT_PAGE_SIZE, **filters):
     key = _get_api_key(api_key)
+    filters["cik"] = resolve_cik_filter(filters.get("cik"), filters.pop("ticker", None))
     base_params = _build_params(filters)
     base_params["pageSize"] = page_size
 
@@ -226,6 +229,7 @@ def lookup_sgml(
     api_key=None,
     page=None,
     page_size=DEFAULT_PAGE_SIZE,
+    ticker=None,
 ):
     """
     Return SGML filing lookup columns: accession and filingDate.
@@ -233,6 +237,7 @@ def lookup_sgml(
     return _lookup(
         "sgml-lookup",
         cik=cik,
+        ticker=ticker,
         accession=accession,
         submission_type=submission_type,
         filing_date=filing_date,
@@ -262,6 +267,7 @@ def stream_sgml(
     api_key=None,
     page=None,
     page_size=DEFAULT_PAGE_SIZE,
+    ticker=None,
 ):
     """
     Yield SGML filing lookup columns one page at a time.
@@ -269,6 +275,7 @@ def stream_sgml(
     yield from _stream_lookup(
         "sgml-lookup",
         cik=cik,
+        ticker=ticker,
         accession=accession,
         submission_type=submission_type,
         filing_date=filing_date,
@@ -298,6 +305,7 @@ def lookup_tar(
     api_key=None,
     page=None,
     page_size=DEFAULT_PAGE_SIZE,
+    ticker=None,
 ):
     """
     Return TAR byte-range lookup columns: accession, filingDate, start, and end.
@@ -305,6 +313,7 @@ def lookup_tar(
     return _lookup(
         "tar-lookup",
         cik=cik,
+        ticker=ticker,
         accession=accession,
         submission_type=submission_type,
         filing_date=filing_date,
@@ -334,6 +343,7 @@ def stream_tar(
     api_key=None,
     page=None,
     page_size=DEFAULT_PAGE_SIZE,
+    ticker=None,
 ):
     """
     Yield TAR byte-range lookup columns one page at a time.
@@ -341,6 +351,7 @@ def stream_tar(
     yield from _stream_lookup(
         "tar-lookup",
         cik=cik,
+        ticker=ticker,
         accession=accession,
         submission_type=submission_type,
         filing_date=filing_date,

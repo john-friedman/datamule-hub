@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from ...utils.format_accession import format_accession
+from ...utils.tickers import resolve_cik_filter
 from ..sec_filings_lookup import stream_sgml
 from . import _rust
 from .utils import prepare_output_dir, validate_tar_max_size_mb
@@ -33,6 +34,7 @@ def download_sgml(
     decompress=True,
     tar_max_size_mb=512,
     overwrite=False,
+    ticker=None,
 ):
     """
     Download SGML archive objects.
@@ -43,6 +45,7 @@ def download_sgml(
 
     Uses the Rust archive downloader for HTTP, decompression, and tar batching.
     """
+    cik = resolve_cik_filter(cik, ticker)
     return _download_sgml_rust(
         cik=cik,
         accession=accession,
