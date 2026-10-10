@@ -45,6 +45,7 @@ def run(
     tar_max_size_mb,
     description,
     logger=None,
+    api_key=None,
 ):
     logger = logger or logging.getLogger(__name__)
     binary = require_binary()
@@ -79,6 +80,10 @@ def run(
             "true" if decompress else "false",
             tar_max_bytes,
         ]
+        environment = None
+        if api_key is not None:
+            environment = os.environ.copy()
+            environment["DATAMULE_API_KEY"] = api_key
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -86,6 +91,7 @@ def run(
             text=True,
             encoding="utf-8",
             bufsize=1,
+            env=environment,
         )
 
         downloaded = []
@@ -94,6 +100,8 @@ def run(
                 event = json.loads(line)
                 if event["type"] == "complete":
                     downloaded.extend(Path(path) for path in event["paths"])
+                elif event["type"] == "missing":
+                    logger.warning("Download unavailable: %s", event["message"])
                 else:
                     logger.error("Download failed: %s", event["message"])
                 progress.update(1)

@@ -9,14 +9,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+const S3_LINK_URL: &str = "https://api.datamule.xyz/v3/get-s3-link";
 const SGML_BASE_URL: &str = "https://sec-filings-archive.sgml.datamule.xyz";
 const TAR_BASE_URL: &str = "https://sec-filings-archive.tar.datamule.xyz";
 const TAR_BLOCK_SIZE: u64 = 512;
 const TAR_END_SIZE: u64 = 1024;
 const ZSTD_MAGIC: &[u8] = b"\x28\xb5\x2f\xfd";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Mode {
+    Xbrl,
     Sgml,
     Metadata,
     Range,
@@ -26,6 +28,7 @@ enum Mode {
 impl Mode {
     fn parse(value: &str) -> Result<Self> {
         match value {
+            "xbrl" => Ok(Self::Xbrl),
             "sgml" => Ok(Self::Sgml),
             "metadata" => Ok(Self::Metadata),
             "range" => Ok(Self::Range),
@@ -291,14 +294,77 @@ fn extract_submission(job: Job, tar_bytes: Vec<u8>, decompress: bool) -> Result<
     Ok(output)
 }
 
+async fn xbrl_download_url(
+    client: &Client,
+    endpoint: &str,
+    object_key: &str,
+    api_key: &str,
+) -> Result<Option<String>> {
+    let response = client
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .json(&json!({"path": object_key}))
+        .send()
+        .await
+        .with_context(|| format!("XBRL download-link request failed for {object_key}"))?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let payload: serde_json::Value = response
+        .error_for_status()
+        .with_context(|| format!("XBRL download-link request rejected for {object_key}"))?
+        .json()
+        .await?;
+    if payload["success"] != true {
+        bail!(
+            "XBRL download-link request failed for {object_key}: {}",
+            payload["error"]
+        );
+    }
+    let url = payload["data"]["download_url"]
+        .as_str()
+        .ok_or_else(|| anyhow!("XBRL download-link response has no download_url"))?;
+    Ok(Some(url.to_owned()))
+}
+
+fn xbrl_item(job: Job, mut data: Vec<u8>, decompress: bool) -> Result<DownloadItem> {
+    let suffix = if decompress {
+        data = decode_zstd(data)?;
+        serde_json::from_slice::<serde_json::Value>(&data).context("invalid XBRL fact JSON")?;
+        "json"
+    } else {
+        "json.zst"
+    };
+    Ok(DownloadItem {
+        logical_path: PathBuf::from(job.filing_date).join(format!("{}.{suffix}", job.accession)),
+        data,
+    })
+}
+
 async fn process_job(
     mode: Mode,
     job: Job,
     client: Client,
     decompress: bool,
     cpu: Arc<Semaphore>,
+    api_key: Option<Arc<str>>,
 ) -> Result<Vec<DownloadItem>> {
     match mode {
+        Mode::Xbrl => {
+            let api_key =
+                api_key.ok_or_else(|| anyhow!("DATAMULE_API_KEY is required for XBRL"))?;
+            let object_key = format!(
+                "sec-filings/xbrl/{}/{}.json.zst",
+                job.filing_date, job.accession
+            );
+            let Some(url) = xbrl_download_url(&client, S3_LINK_URL, &object_key, &api_key).await?
+            else {
+                return Ok(Vec::new());
+            };
+            let data = get_full(&client, &url).await?;
+            let item = run_blocking(cpu, move || xbrl_item(job, data, decompress)).await?;
+            Ok(vec![item])
+        }
         Mode::Sgml => {
             let url = format!(
                 "{SGML_BASE_URL}/{}/{}.sgml.zst",
@@ -396,6 +462,14 @@ async fn main() -> Result<()> {
     }
 
     let mode = Mode::parse(&args[1])?;
+    let api_key = if mode == Mode::Xbrl {
+        Some(Arc::<str>::from(
+            std::env::var("DATAMULE_API_KEY")
+                .context("DATAMULE_API_KEY is required for XBRL downloads")?,
+        ))
+    } else {
+        None
+    };
     let jobs = read_jobs(Path::new(&args[2]))?;
     let output_dir = PathBuf::from(&args[3]);
     let max_workers: usize = args[4].parse()?;
@@ -423,10 +497,12 @@ async fn main() -> Result<()> {
     let cpu = Arc::new(Semaphore::new(decomp_workers));
     let stdout = std::io::stdout();
     let mut output = BufWriter::new(stdout.lock());
+    let mut failed = false;
 
     let work = stream::iter(jobs.into_iter().map(|job| {
         let client = client.clone();
         let cpu = cpu.clone();
+        let api_key = api_key.clone();
         async move {
             let context = format!(
                 "filing_date={} accession={}",
@@ -434,7 +510,7 @@ async fn main() -> Result<()> {
             );
             (
                 context,
-                process_job(mode, job, client, decompress, cpu).await,
+                process_job(mode, job, client, decompress, cpu, api_key).await,
             )
         }
     }))
@@ -443,6 +519,14 @@ async fn main() -> Result<()> {
 
     while let Some((context, result)) = work.next().await {
         match result {
+            Ok(items) if mode == Mode::Xbrl && items.is_empty() => {
+                serde_json::to_writer(
+                    &mut output,
+                    &json!({
+                        "type": "missing", "message": format!("XBRL object not found: {context}"),
+                    }),
+                )?;
+            }
             Ok(items) => {
                 let mut paths = Vec::with_capacity(items.len());
                 for item in items {
@@ -457,6 +541,7 @@ async fn main() -> Result<()> {
                 )?;
             }
             Err(error) => {
+                failed |= mode == Mode::Xbrl;
                 serde_json::to_writer(
                     &mut output,
                     &json!({
@@ -471,6 +556,9 @@ async fn main() -> Result<()> {
     }
 
     sink.finish()?;
+    if failed {
+        bail!("one or more XBRL downloads failed");
+    }
     Ok(())
 }
 

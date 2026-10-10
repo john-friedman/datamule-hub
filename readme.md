@@ -52,10 +52,11 @@ print(rows[0])
 ## Archive Helpers
 
 ```python
-from datamulehub import sec_filings_archive
+from datamulehub import sec_filings_archive, xbrl_archive
 
 sec_filings_archive.download_sgml(cik=320193, submission_type="10-K", output_dir="out")
 sec_filings_archive.download_tar(cik=320193, document_type=["10-K", "10-Q"], output_dir="out")
+xbrl_archive.download_xbrl(cik=320193, submission_type="10-K", output_dir="xbrl_out")
 ```
 
 ## Object Transfer

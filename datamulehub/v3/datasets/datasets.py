@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from ...api_key import get_api_key
 from ...utils.format_accession import format_accession
+from ...utils.xbrl import iter_xbrl_filings, normalize_accessions
 from ..sec_filings_lookup import stream_sgml
 from .document_types import DOCUMENT_TYPES_BY_TABLE
 
@@ -24,6 +25,8 @@ DELTA_DOWNLOAD_WORKERS = 32
 DELTA_REQUEST_TIMEOUT_SECONDS = 30
 
 DATASET_PATH_MAP = {
+    "filer_metadata": "metadata/filer_metadata/data.parquet",
+    "filer_names": "metadata/filer_names/data.parquet",
     "simple_xbrl": "datasets/simple_xbrl/data.parquet",
     "simple_xbrl_table": "datasets/simple_xbrl/data.parquet",
     "submissions_metadata": "metadata/submissions_metadata/data.parquet",
@@ -351,11 +354,53 @@ def _merge_parquet(sources, output_path):
                 writer.write_batch(pa.RecordBatch.from_arrays(arrays, schema=schema))
 
 
-def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_storage="both"):
+def _download_simple_xbrl_accessions(accession, filename, api_key, chunk_size):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    candidates = {
+        _source_key(None, filing_date, number)
+        for filing_date, number in iter_xbrl_filings(accession=accession, api_key=api_key)
+    }
+    output = filename or "simple_xbrl.parquet"
+    output_path = Path(output).resolve()
+    with tempfile.TemporaryDirectory(dir=output_path.parent) as directory:
+        additions, links = _download_delta_files(candidates, directory, api_key, chunk_size)
+        merged_path = Path(directory) / "merged.parquet"
+        if additions:
+            _merge_parquet([(path, key) for path, key in additions], merged_path)
+        else:
+            schema = pa.schema([
+                pa.field("accessionNumber", pa.uint64()),
+                pa.field("context_id", pa.uint64()),
+                *[pa.field(name, pa.string()) for name in [
+                    "taxonomy", "name", "value", "period_start_date", "period_end_date", "members",
+                    "filingDate", "_sourceKey",
+                ]],
+            ])
+            pq.write_table(pa.Table.from_batches([], schema=schema), merged_path, compression="zstd")
+        os.replace(merged_path, output_path)
+
+    downloaded = {key.rsplit("/", 1)[1].removesuffix(".parquet") for _, key in additions}
+    result = _download_result(output, None, links)
+    result["object_keys"] = [key for _, key in additions]
+    result["accession"] = accession
+    result["missing_accessions"] = [number for number in accession if number not in downloaded]
+    return result
+
+
+def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_storage="both", accession=None):
     if from_storage not in ("both", "daily", "delta"):
         raise ValueError("from_storage must be 'both', 'daily', or 'delta'")
 
     object_key = resolve_path(dataset)
+    if accession is not None:
+        accession = normalize_accessions(accession)
+        if object_key != DATASET_PATH_MAP["simple_xbrl"]:
+            raise ValueError("accession is supported only for simple_xbrl downloads.")
+        if from_storage == "daily":
+            raise ValueError("accession downloads use per-filing objects; from_storage='daily' is unavailable.")
+        return _download_simple_xbrl_accessions(accession, filename, api_key, chunk_size)
     table = _xml_table_name(object_key)
     has_delta = table is not None or object_key == DATASET_PATH_MAP["simple_xbrl"]
     if from_storage == "delta" and not has_delta:
@@ -404,6 +449,10 @@ def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_
         if lookup_executor:
             lookup_executor.shutdown(wait=True)
 
+    return _download_result(output, link["object_key"] if link else object_key, links)
+
+
+def _download_result(output, object_key, links):
     cost = sum(item.get("billing", {}).get("total_charge", 0) or 0 for item in links)
     balances = [
         item.get("billing", {}).get("remaining_balance")
@@ -419,7 +468,7 @@ def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_
 
     return {
         "filename": output,
-        "object_key": link["object_key"] if link else object_key,
+        "object_key": object_key,
         "size_bytes": os.path.getsize(output),
         "size_gb": os.path.getsize(output) / 1000000000,
         "cost": cost,
