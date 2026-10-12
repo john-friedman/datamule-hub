@@ -1,6 +1,10 @@
 from datamulehub import databases
 
-# $0.0099 as of 10/12/2026
+# submission_metadata is an endpoint that reports metadata generated from filings
+# filing_metadata_filings is extracted from filings themselves, by datamule
+# one quirk: Filings in filing_metadata_filings before Jan 2025 are from the SEC's bulk archive, which sometimes is slightly different.
+
+# $0.01 as of 10/12/2026
 databases.query(
     """
     SELECT DISTINCT
@@ -8,15 +12,15 @@ databases.query(
         || CAST(s.cik AS varchar) || '/'
         || REPLACE(s.accessionnumber, '-', '') || '/'
         || s.accessionnumber || '-index.html' AS sec_index_url,
-        d.submissiontype AS filing_reported_type,
+        f."type" AS filing_reported_type,
         s."form" AS sec_endpoint_type
     FROM submissions_metadata s
-    JOIN sec_submission_details_table d
+    JOIN filing_metadata_filings f
       ON CAST(REPLACE(s.accessionnumber, '-', '') AS bigint)
-       = CAST(d.accessionnumber AS bigint)
-    WHERE s."form" <> d.submissiontype
+       = CAST(f.accessionnumber AS bigint)
+    WHERE s."form" <> f."type"
       AND s.filingdate >= '2025-01-01'
-      AND d.filingdate >= '2025-01-01'
+      AND f.filingdate >= '2025-01-01'
     """,
     output_dir="submission_type_mismatches",
 )
