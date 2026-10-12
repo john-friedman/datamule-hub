@@ -24,6 +24,8 @@ DELTA_RETRY_SECONDS = 3
 DELTA_DOWNLOAD_WORKERS = 32
 DELTA_REQUEST_TIMEOUT_SECONDS = 30
 
+METADATA_TABLES = tuple(f"filing_metadata_{name}" for name in ("filings", "entities", "former_companies", "series", "classes"))
+
 DATASET_PATH_MAP = {
     "filer_metadata": "metadata/filer_metadata/data.parquet",
     "filer_names": "metadata/filer_names/data.parquet",
@@ -39,6 +41,7 @@ DATASET_PATH_MAP = {
     "sec_documents": "metadata/sec_documents_table/data.parquet",
     "sec_documents_table": "metadata/sec_documents_table/data.parquet",
 }
+DATASET_PATH_MAP.update({table: f"datasets/metadata/{table}/data.parquet" for table in METADATA_TABLES})
 
 
 def resolve_path(dataset):
@@ -179,11 +182,19 @@ def _xml_table_name(object_key):
     return None
 
 
+def _metadata_table_name(object_key):
+    parts = object_key.split("/")
+    if len(parts) == 4 and parts[:2] == ["datasets", "metadata"] and parts[3] == "data.parquet" and parts[2] in METADATA_TABLES:
+        return parts[2]
+    return None
+
+
 def _source_key(table, filing_date, accession):
     accession = format_accession(accession, "no-dash")
     if table is None:
         return f"sec-filings/simple_xbrl/{filing_date}/{accession}.parquet"
-    return f"sec-filings/xml2tables/{filing_date}/{table}/{accession}.parquet"
+    prefix = "metadata" if table in METADATA_TABLES else "xml2tables"
+    return f"sec-filings/{prefix}/{filing_date}/{table}/{accession}.parquet"
 
 
 def _snapshot_keys(path, table, candidates):
@@ -210,6 +221,8 @@ def _snapshot_keys(path, table, candidates):
 def _delta_keys_for_date(table, filing_date, api_key):
     if table is None:
         filters = {"contains_xbrl": True}
+    elif table in METADATA_TABLES:
+        filters = {}
     else:
         document_types = DOCUMENT_TYPES_BY_TABLE.get(table)
         if document_types is None:
@@ -401,10 +414,10 @@ def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_
         if from_storage == "daily":
             raise ValueError("accession downloads use per-filing objects; from_storage='daily' is unavailable.")
         return _download_simple_xbrl_accessions(accession, filename, api_key, chunk_size)
-    table = _xml_table_name(object_key)
+    table = _xml_table_name(object_key) or _metadata_table_name(object_key)
     has_delta = table is not None or object_key == DATASET_PATH_MAP["simple_xbrl"]
     if from_storage == "delta" and not has_delta:
-        raise ValueError("from_storage='delta' requires an XML table or simple_xbrl dataset")
+        raise ValueError("from_storage='delta' requires a metadata table, XML table or simple_xbrl dataset")
 
     et_now = datetime.now().astimezone(ZoneInfo("America/New_York")) if has_delta else None
     filing_date = _delta_filing_date(et_now) if et_now and from_storage != "daily" else None
