@@ -1,6 +1,6 @@
 from datamulehub import databases
 
-# $1.317 as of 10/5/2026
+# Estimated $0.1317 at current rates.
 databases.query(
     """
     SELECT acc AS accessionnumber, c.cik, d.submissiontype, taxonomy, digit, n

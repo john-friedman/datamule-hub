@@ -10,7 +10,7 @@ logging.basicConfig(
 )
 
 # Download every MSFT 8-K and 8-K/A in batch TAR files for better speed.
-# $0.00281 as of 10/5/2026
+# Estimated $0.001 at current rates.
 sec_filings_archive.download_tar(
     ticker="MSFT",
     submission_type=["8-K", "8-K/A"],
@@ -20,7 +20,7 @@ sec_filings_archive.download_tar(
 input("Proceed?")
 
 # Download every MSFT 8-K and 8-K/A as individual files.
-# $0.00281 as of 10/5/2026
+# Estimated $0.001 at current rates.
 sec_filings_archive.download_tar(
     ticker="MSFT",
     submission_type=["8-K", "8-K/A"],
@@ -31,7 +31,7 @@ sec_filings_archive.download_tar(
 input("Proceed?")
 
 # Download only the 8-K document within MSFT's 8-K filings. An 8-K filing has an 8-K root form as well as other attachments.
-# $0.00281 as of 10/5/2026
+# Estimated $0.001 at current rates.
 sec_filings_archive.download_tar(
     ticker="MSFT",
     submission_type=["8-K", "8-K/A"],
@@ -73,7 +73,7 @@ input("Proceed?")
 
 
 # Download every MSFT 8-K and 8-K/A in batch TAR files as original SGML.
-# $0.00281 as of 10/5/2026
+# Estimated $0.001 at current rates.
 sec_filings_archive.download_sgml(
     ticker="MSFT",
     submission_type=["8-K", "8-K/A"],
@@ -83,7 +83,7 @@ sec_filings_archive.download_sgml(
 input("Proceed?")
 
 # Download every MSFT 8-K and 8-K/A as individual SGML files.
-# $0.00281 as of 10/5/2026
+# Estimated $0.001 at current rates.
 sec_filings_archive.download_sgml(
     ticker="MSFT",
     submission_type=["8-K", "8-K/A"],

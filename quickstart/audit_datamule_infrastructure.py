@@ -10,7 +10,7 @@ end_seconds = int(datetime.combine(end_date, time(), eastern).timestamp())
 
 
 # Download Fastest SEC Filing Websocket's metrics
-# $0.3010 as of 10/5/2026
+# Estimated $0.0301 at current rates.
 databases.query(
     f"""
     SELECT accession, detected_time, detection_method
@@ -22,7 +22,7 @@ databases.query(
 )
 
 # Download Websocket's metrics
-# $0.0117 as of 10/5/2026
+# Estimated $0.00117 at current rates.
 databases.query(
     f"""
     SELECT accession, source, detected_time
@@ -35,7 +35,7 @@ databases.query(
 )
 
 # Download acceptancedatetime according to the SEC.
-# $0.0286 as of 10/5/2026
+# Estimated $0.00286 at current rates.
 databases.query(
     f"""
     SELECT accessionnumber, acceptancedatetime, filingdate

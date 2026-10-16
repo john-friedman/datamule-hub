@@ -4,7 +4,7 @@ from datamulehub import databases
 # filing_metadata_filings is extracted from filings themselves, by datamule
 # one quirk: Filings in filing_metadata_filings before Jan 2025 are from the SEC's bulk archive, which sometimes is slightly different.
 
-# $0.01 as of 10/12/2026
+# Estimated $0.001 at current rates.
 databases.query(
     """
     SELECT DISTINCT

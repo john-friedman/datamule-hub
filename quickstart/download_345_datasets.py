@@ -18,7 +18,7 @@ tables = [
 
 
 # Download every 345 dataset (updated daily)
-# $7.63 as of 10/5/2026
+# Estimated $0.763 at current rates.
 for table in tables:
     datasets.download(
         f"{table}",
@@ -28,7 +28,7 @@ for table in tables:
 input("Proceed?")
 
 # Download a dataset updated in realtime.
-# $1.69. 
+# Estimated $0.169 at current rates.
 datasets.download(
     "345",
     filename=f"345_full.parquet",
