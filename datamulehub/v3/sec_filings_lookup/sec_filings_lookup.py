@@ -6,6 +6,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from ...api_key import _format_api_key_credits
 from ...utils.tickers import resolve_cik_filter
 
 
@@ -176,12 +177,13 @@ def _stream_lookup(endpoint, api_key=None, page=None, page_size=DEFAULT_PAGE_SIZ
         has_more = pagination.get("hasMore", False)
 
         logger.info(
-            "SEC filings lookup page fetched: endpoint=%s page=%s rows=%s has_more=%s page_charge=%s elapsed=%.1fs",
+            "SEC filings lookup page fetched: endpoint=%s page=%s rows=%s has_more=%s page_charge=%s%s elapsed=%.1fs",
             endpoint,
             current_page,
             page_rows,
             has_more,
             page_charge,
+            _format_api_key_credits(billing),
             time.time() - start_time,
         )
 
@@ -189,12 +191,13 @@ def _stream_lookup(endpoint, api_key=None, page=None, page_size=DEFAULT_PAGE_SIZ
 
         if single_page or not has_more:
             logger.info(
-                "SEC filings lookup complete: endpoint=%s pages=%s rows=%s total_charge=%s remaining_balance=%s elapsed=%.1fs",
+                "SEC filings lookup complete: endpoint=%s pages=%s rows=%s total_charge=%s remaining_balance=%s%s elapsed=%.1fs",
                 endpoint,
                 pages,
                 rows,
                 total_charge,
                 remaining_balance,
+                _format_api_key_credits(billing),
                 time.time() - start_time,
             )
             return

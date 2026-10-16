@@ -9,7 +9,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from ...api_key import get_api_key
+from ...api_key import _format_api_key_credits, get_api_key
 from .fastest import (
     download_fastest_metadata_query,
     is_fastest_metadata_query,
@@ -147,12 +147,27 @@ def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 
     download_charge = _float_header(headers, "x-datamule-s3-download-charge")
     total_charge = _float_header(headers, "x-datamule-total-charge")
     remaining_balance = _float_header(headers, "x-datamule-remaining-balance")
+    api_key_credits = headers.get("x-datamule-remaining-api-key-credits")
+    remaining_api_key_credits = (
+        None if api_key_credits in (None, "unlimited") else float(api_key_credits)
+    )
     query_id = headers.get("x-datamule-query-id")
+    billing = {
+        "athena_scan": scan_charge,
+        "s3_download": download_charge,
+        "total_charge": total_charge,
+        "remaining_balance": remaining_balance,
+    }
+    if api_key_credits is not None:
+        billing["remaining_api_key_credits"] = remaining_api_key_credits
 
     if not quiet:
         print(f"Downloaded query result to {destination_dir}")
         if total_charge is not None:
-            print(f"- Cost: ${total_charge:.4f} | Remaining balance: ${remaining_balance:.2f}")
+            print(
+                f"- Cost: ${total_charge:.4f} | Remaining balance: ${remaining_balance:.2f}"
+                + _format_api_key_credits(billing)
+            )
 
     return {
         "output_dir": str(destination_dir),
@@ -160,12 +175,8 @@ def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 
         "query_id": query_id,
         "cost": total_charge,
         "remaining_balance": remaining_balance,
-        "billing": {
-            "athena_scan": scan_charge,
-            "s3_download": download_charge,
-            "total_charge": total_charge,
-            "remaining_balance": remaining_balance,
-        },
+        "remaining_api_key_credits": remaining_api_key_credits,
+        "billing": billing,
     }
 
 

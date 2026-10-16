@@ -5,7 +5,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from ...api_key import get_api_key
+from ...api_key import _format_api_key_credits, get_api_key
 
 
 API_URL = "https://api.datamule.xyz/v3/fastest-sec-filings-metadata"
@@ -73,6 +73,7 @@ def download_fastest_metadata_query(sql, output_dir=None, api_key=None, quiet=Fa
         "query_id": None,
         "cost": billing.get("total_charge"),
         "remaining_balance": billing.get("remaining_balance"),
+        "remaining_api_key_credits": billing.get("remaining_api_key_credits"),
         "billing": billing,
     }
 
@@ -310,4 +311,7 @@ def _print_billing(billing):
     cost = billing.get("total_charge")
     remaining = billing.get("remaining_balance")
     if cost is not None and remaining is not None:
-        print(f"Cost: ${float(cost):.4f} | Remaining balance: ${float(remaining):.2f}")
+        print(
+            f"Cost: ${float(cost):.4f} | Remaining balance: ${float(remaining):.2f}"
+            + _format_api_key_credits(billing)
+        )

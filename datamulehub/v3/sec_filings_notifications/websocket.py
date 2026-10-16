@@ -7,7 +7,7 @@ from datetime import datetime
 
 import websocket
 
-from ...api_key import get_api_key
+from ...api_key import _format_api_key_credits, get_api_key
 
 
 WS_URL = "wss://api.datamule.xyz/v3/websocket"
@@ -200,9 +200,10 @@ def _request_fastest_access(key):
     remaining_balance = billing.get("remaining_balance")
     if charge is not None and remaining_balance is not None:
         logger.info(
-            "Fastest filings access issued: cost=$%.2f, remaining balance=$%.2f, expires=%s",
+            "Fastest filings access issued: cost=$%.2f, remaining balance=$%.2f%s, expires=%s",
             float(charge),
             float(remaining_balance),
+            _format_api_key_credits(billing),
             expires_at,
         )
     else:

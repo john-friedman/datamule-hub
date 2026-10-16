@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from tqdm import tqdm
 
-from ...api_key import get_api_key
+from ...api_key import _format_api_key_credits, get_api_key
 from ...utils.format_accession import format_accession
 from ...utils.xbrl import iter_xbrl_filings, normalize_accessions
 from ..sec_filings_lookup import stream_sgml
@@ -475,9 +475,19 @@ def _download_result(output, object_key, links):
     remaining = min(balances) if balances else None
     billing = links[0].get("billing", {}) if links else {}
     billing = {**billing, "total_charge": cost, "remaining_balance": remaining}
+    if any("remaining_api_key_credits" in item.get("billing", {}) for item in links):
+        credits = [
+            item["billing"]["remaining_api_key_credits"]
+            for item in links
+            if item.get("billing", {}).get("remaining_api_key_credits") is not None
+        ]
+        billing["remaining_api_key_credits"] = min(credits) if credits else None
     print(f"Downloaded to {output}")
     if remaining is not None:
-        print(f"- Cost: ${cost:.4f} | Remaining balance: ${remaining:.2f}")
+        print(
+            f"- Cost: ${cost:.4f} | Remaining balance: ${remaining:.2f}"
+            + _format_api_key_credits(billing)
+        )
 
     return {
         "filename": output,
@@ -486,5 +496,6 @@ def _download_result(output, object_key, links):
         "size_gb": os.path.getsize(output) / 1000000000,
         "cost": cost,
         "remaining_balance": remaining,
+        "remaining_api_key_credits": billing.get("remaining_api_key_credits"),
         "billing": billing,
     }
