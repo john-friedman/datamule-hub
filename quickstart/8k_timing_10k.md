@@ -432,7 +432,7 @@ WHERE f.filingdate BETWEEN '{start}' AND '{as_of}'
     if output.exists() and sql_path.exists() and sql_path.read_text(encoding="utf-8") == sql:
         return pl.read_parquet(output)
     print("Querying filing_metadata_filings for 8-K and 10-K dates...", flush=True)
-    query = databases.query(sql, output_dir=str(RAW / "filing_metadata_query"), quiet=True)
+    query = databases.query(sql, output_dir=str(RAW / "filing_metadata_query"))
     if not query["files"]:
         raise ValueError("The metadata query returned no Parquet files.")
     result = pl.read_parquet(query["files"]).unique()

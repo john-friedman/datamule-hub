@@ -1,4 +1,5 @@
 import json
+import logging
 import shutil
 import tarfile
 import tempfile
@@ -18,6 +19,7 @@ from .fastest import (
 
 
 API_BASE_URL = "https://api.datamule.xyz"
+logger = logging.getLogger(__name__)
 
 
 def _api_error(exc):
@@ -91,13 +93,12 @@ def _extract_result_files(download_path, output_dir):
     return files
 
 
-def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 * 1024, quiet=False):
+def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 * 1024):
     if is_fastest_metadata_query(sql):
         return download_fastest_metadata_query(
             sql,
             output_dir=output_dir,
             api_key=api_key,
-            quiet=quiet,
         )
 
     key = get_api_key(api_key)
@@ -129,7 +130,7 @@ def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 
                     unit="B",
                     unit_scale=True,
                     desc=download_path.name,
-                    disable=quiet,
+                    disable=not logger.isEnabledFor(logging.INFO),
                 ) as progress:
                     while True:
                         chunk = response.read(chunk_size)
@@ -161,13 +162,14 @@ def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 
     if api_key_credits is not None:
         billing["remaining_api_key_credits"] = remaining_api_key_credits
 
-    if not quiet:
-        print(f"Downloaded query result to {destination_dir}")
-        if total_charge is not None:
-            print(
-                f"- Cost: ${total_charge:.4f} | Remaining balance: ${remaining_balance:.2f}"
-                + _format_api_key_credits(billing)
-            )
+    logger.info("Downloaded query result to %s", destination_dir)
+    if total_charge is not None:
+        logger.info(
+            "Cost: $%.4f | Remaining balance: $%.2f%s",
+            total_charge,
+            remaining_balance,
+            _format_api_key_credits(billing),
+        )
 
     return {
         "output_dir": str(destination_dir),
@@ -236,7 +238,6 @@ def read_query(sql, api_key=None, wait_seconds=600):
             output_dir=tmp_dir,
             api_key=api_key,
             wait_seconds=wait_seconds,
-            quiet=False,
         )
         table = _read_result_table(result["output_dir"])
         return table.to_pylist()

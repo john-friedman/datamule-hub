@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import urllib.error
 import urllib.parse
@@ -9,6 +10,7 @@ from ...api_key import _format_api_key_credits, get_api_key
 
 
 API_URL = "https://api.datamule.xyz/v3/fastest-sec-filings-metadata"
+logger = logging.getLogger(__name__)
 TABLE_NAME = "fastest_sec_filings_metadata"
 FIELDS = (
     "accession",
@@ -48,11 +50,11 @@ def read_fastest_metadata_query(sql, api_key=None):
     columns, params = _parse_query(sql)
     payload = _request(params, api_key)
     rows = [_project(row, columns) for row in payload["results"]]
-    _print_billing(payload["billing"])
+    _log_billing(payload["billing"])
     return rows
 
 
-def download_fastest_metadata_query(sql, output_dir=None, api_key=None, quiet=False):
+def download_fastest_metadata_query(sql, output_dir=None, api_key=None):
     columns, params = _parse_query(sql)
     payload = _request(params, api_key)
     rows = [_project(row, columns) for row in payload["results"]]
@@ -63,9 +65,8 @@ def download_fastest_metadata_query(sql, output_dir=None, api_key=None, quiet=Fa
     _write_parquet(result_path, rows, columns)
 
     billing = payload["billing"]
-    if not quiet:
-        print(f"Downloaded query result to {destination_dir}")
-        _print_billing(billing)
+    logger.info("Downloaded query result to %s", destination_dir)
+    _log_billing(billing)
 
     return {
         "output_dir": str(destination_dir),
@@ -307,11 +308,13 @@ def _write_parquet(path, rows, columns):
     pq.write_table(pa.Table.from_pylist(rows, schema=schema), path)
 
 
-def _print_billing(billing):
+def _log_billing(billing):
     cost = billing.get("total_charge")
     remaining = billing.get("remaining_balance")
     if cost is not None and remaining is not None:
-        print(
-            f"Cost: ${float(cost):.4f} | Remaining balance: ${float(remaining):.2f}"
-            + _format_api_key_credits(billing)
+        logger.info(
+            "Cost: $%.4f | Remaining balance: $%.2f%s",
+            float(cost),
+            float(remaining),
+            _format_api_key_credits(billing),
         )
