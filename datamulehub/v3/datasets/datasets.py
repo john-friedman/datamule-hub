@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from ...api_key import _format_api_key_credits, get_api_key
 from ...utils.format_accession import format_accession
-from ...utils.xbrl import iter_xbrl_filings, normalize_accessions
+from ...utils.xbrl import ACCESSION_BATCH_SIZE, iter_xbrl_filings, normalize_accessions
 from ..sec_filings_lookup import stream_sgml
 from .document_types import DOCUMENT_TYPES_BY_TABLE
 
@@ -58,7 +58,7 @@ def resolve_path(dataset):
             return f"{value}data.parquet"
         return value
 
-    if value.startswith("xml2tables/"):
+    if value.startswith(("xml2tables/", "xmltables/")):
         table = value.split("/", 1)[1].strip("/")
         return f"datasets/xml2tables/{table}/data.parquet"
 
@@ -218,21 +218,46 @@ def _snapshot_keys(path, table, candidates):
     return candidates
 
 
-def _delta_keys_for_date(table, filing_date, api_key):
+def _dataset_filing_filters(table):
     if table is None:
-        filters = {"contains_xbrl": True}
-    elif table in METADATA_TABLES:
-        filters = {}
-    else:
-        document_types = DOCUMENT_TYPES_BY_TABLE.get(table)
-        if document_types is None:
-            raise ValueError(f"Unknown XML table: {table}")
-        filters = {"document_type": document_types}
+        return {"contains_xbrl": True}
+    if table in METADATA_TABLES:
+        return {}
+    document_types = DOCUMENT_TYPES_BY_TABLE.get(table)
+    if document_types is None:
+        raise ValueError(f"Unknown XML table: {table}")
+    return {"document_type": document_types}
 
+
+def _delta_keys_for_date(table, filing_date, api_key):
     keys = set()
-    for data in stream_sgml(filing_date=filing_date, api_key=api_key, **filters):
+    for data in stream_sgml(filing_date=filing_date, api_key=api_key, **_dataset_filing_filters(table)):
         for accession in data.get("accession", []):
             keys.add(_source_key(table, filing_date, accession))
+    return keys
+
+
+def _accession_keys(table, accession, api_key):
+    if table is None:
+        return {
+            _source_key(None, filing_date, number)
+            for filing_date, number in iter_xbrl_filings(accession=accession, api_key=api_key)
+        }
+
+    filters = _dataset_filing_filters(table)
+    keys = set()
+    for index in range(0, len(accession), ACCESSION_BATCH_SIZE):
+        batch = accession[index:index + ACCESSION_BATCH_SIZE]
+        for data in stream_sgml(accession=batch, api_key=api_key, **filters):
+            dates = data.get("filingDate", [])
+            numbers = data.get("accession", [])
+            if len(dates) != len(numbers):
+                raise ValueError("Filing lookup returned mismatched accession and filingDate columns.")
+            for filing_date, number in zip(dates, numbers):
+                number = format_accession(number, "no-dash")
+                if number not in batch:
+                    raise ValueError("Filing lookup returned an accession outside the requested batch.")
+                keys.add(_source_key(table, filing_date, number))
     return keys
 
 
@@ -367,22 +392,19 @@ def _merge_parquet(sources, output_path):
                 writer.write_batch(pa.RecordBatch.from_arrays(arrays, schema=schema))
 
 
-def _download_simple_xbrl_accessions(accession, filename, api_key, chunk_size):
+def _download_accessions(table, accession, filename, api_key, chunk_size):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    candidates = {
-        _source_key(None, filing_date, number)
-        for filing_date, number in iter_xbrl_filings(accession=accession, api_key=api_key)
-    }
-    output = filename or "simple_xbrl.parquet"
+    candidates = _accession_keys(table, accession, api_key)
+    output = filename or f"{table or 'simple_xbrl'}.parquet"
     output_path = Path(output).resolve()
     with tempfile.TemporaryDirectory(dir=output_path.parent) as directory:
         additions, links = _download_delta_files(candidates, directory, api_key, chunk_size)
         merged_path = Path(directory) / "merged.parquet"
         if additions:
             _merge_parquet([(path, key) for path, key in additions], merged_path)
-        else:
+        elif table is None:
             schema = pa.schema([
                 pa.field("accessionNumber", pa.uint64()),
                 pa.field("context_id", pa.uint64()),
@@ -391,6 +413,9 @@ def _download_simple_xbrl_accessions(accession, filename, api_key, chunk_size):
                     "filingDate", "_sourceKey",
                 ]],
             ])
+            pq.write_table(pa.Table.from_batches([], schema=schema), merged_path, compression="zstd")
+        else:
+            schema = pa.schema([pa.field("_sourceKey", pa.string())])
             pq.write_table(pa.Table.from_batches([], schema=schema), merged_path, compression="zstd")
         os.replace(merged_path, output_path)
 
@@ -407,14 +432,14 @@ def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_
         raise ValueError("from_storage must be 'both', 'daily', or 'delta'")
 
     object_key = resolve_path(dataset)
+    table = _xml_table_name(object_key) or _metadata_table_name(object_key)
     if accession is not None:
         accession = normalize_accessions(accession)
-        if object_key != DATASET_PATH_MAP["simple_xbrl"]:
-            raise ValueError("accession is supported only for simple_xbrl downloads.")
+        if table is None and object_key != DATASET_PATH_MAP["simple_xbrl"]:
+            raise ValueError("accession requires a metadata table, XML table or simple_xbrl dataset.")
         if from_storage == "daily":
             raise ValueError("accession downloads use per-filing objects; from_storage='daily' is unavailable.")
-        return _download_simple_xbrl_accessions(accession, filename, api_key, chunk_size)
-    table = _xml_table_name(object_key) or _metadata_table_name(object_key)
+        return _download_accessions(table, accession, filename, api_key, chunk_size)
     has_delta = table is not None or object_key == DATASET_PATH_MAP["simple_xbrl"]
     if from_storage == "delta" and not has_delta:
         raise ValueError("from_storage='delta' requires a metadata table, XML table or simple_xbrl dataset")

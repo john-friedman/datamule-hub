@@ -1,11 +1,19 @@
-from .gcs.bucket_transfer import bucket_transfer as gcs_archive_transfer
-from .gcs.datasets_transfer import datasets_transfer as gcs_dataset_transfer
-from .s3.bucket_transfer import bucket_transfer as s3_archive_transfer
-from .s3.datasets_transfer import datasets_transfer as s3_dataset_transfer
+from .gcs.archive_transfer import transfer_sgml_archive as transfer_sgml_archive_gcs
+from .gcs.archive_transfer import transfer_tar_archive as transfer_tar_archive_gcs
+from .gcs.archive_transfer import transfer_xbrl_archive as transfer_xbrl_archive_gcs
+from .gcs.datasets_transfer import transfer_dataset as transfer_dataset_gcs
+from .s3.archive_transfer import transfer_sgml_archive as transfer_sgml_archive_s3
+from .s3.archive_transfer import transfer_tar_archive as transfer_tar_archive_s3
+from .s3.archive_transfer import transfer_xbrl_archive as transfer_xbrl_archive_s3
+from .s3.datasets_transfer import transfer_dataset as transfer_dataset_s3
 
 __all__ = [
-    "gcs_archive_transfer",
-    "gcs_dataset_transfer",
-    "s3_archive_transfer",
-    "s3_dataset_transfer",
+    "transfer_dataset_gcs",
+    "transfer_dataset_s3",
+    "transfer_sgml_archive_gcs",
+    "transfer_sgml_archive_s3",
+    "transfer_tar_archive_gcs",
+    "transfer_tar_archive_s3",
+    "transfer_xbrl_archive_gcs",
+    "transfer_xbrl_archive_s3",
 ]

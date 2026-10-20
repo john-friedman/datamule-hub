@@ -3,7 +3,7 @@ import logging
 import urllib.error
 import urllib.request
 
-from ...api_key import api_key
+from ...api_key import get_api_key
 
 
 API_BASE_URL = "https://api.datamule.xyz/v3/sec-filings-webhooks"
@@ -30,11 +30,11 @@ def _normalize_sources(sources):
     return result
 
 
-def _request(method, path="", body=None):
+def _request(method, path="", body=None, api_key=None):
     url = API_BASE_URL + path
     data = None
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {get_api_key(api_key)}",
         "User-Agent": "datamule-hub",
     }
 
@@ -57,7 +57,7 @@ def _request(method, path="", body=None):
         raise Exception(f"API request failed ({exc.code}): {error_body}") from exc
 
 
-def add_endpoint(endpoint, submission_types=None, ciks=None, sources=None):
+def add_endpoint(endpoint, submission_types=None, ciks=None, sources=None, api_key=None):
     """
     Register one HTTPS endpoint for SEC filing webhook notifications.
 
@@ -75,28 +75,28 @@ def add_endpoint(endpoint, submission_types=None, ciks=None, sources=None):
     if ciks:
         body["ciks"] = ciks
 
-    result = _request("POST", body=body)
+    result = _request("POST", body=body, api_key=api_key)
     logger.info("Webhook endpoint added: %s", endpoint)
     return result
 
 
-def list_endpoints():
+def list_endpoints(api_key=None):
     """List the user's registered SEC filing webhook endpoints."""
-    result = _request("GET")
+    result = _request("GET", api_key=api_key)
     logger.info("Webhook endpoints listed")
     return result
 
 
-def remove_endpoint(id=None, endpoint=None):
+def remove_endpoint(id=None, endpoint=None, api_key=None):
     """Remove one SEC filing webhook endpoint by Datamule webhook ID or URL."""
     if (id is None) == (endpoint is None):
         raise ValueError("Provide exactly one of id or endpoint.")
 
     if id is not None:
-        result = _request("DELETE", path=f"/{id}")
+        result = _request("DELETE", path=f"/{id}", api_key=api_key)
         logger.info("Webhook endpoint removed: id=%s", id)
         return result
 
-    result = _request("DELETE", body={"endpoint": endpoint})
+    result = _request("DELETE", body={"endpoint": endpoint}, api_key=api_key)
     logger.info("Webhook endpoint removed: %s", endpoint)
     return result

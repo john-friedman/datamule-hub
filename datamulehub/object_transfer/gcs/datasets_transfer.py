@@ -2,11 +2,10 @@ import json
 import urllib
 import urllib.request
 from tqdm import tqdm
-from datetime import datetime, timezone
-from google.cloud import storage as gcs
 
 from ...api_key import get_api_key
 from ...v3.datasets import resolve_path
+from .utils import _get_gcs_client, _upload_response
 
 
 def _get_dataset_url(dataset, api_key=None):
@@ -30,14 +29,8 @@ def _get_dataset_url(dataset, api_key=None):
     return data['data']['download_url'], data['data']['size_gb'], billing, data['data'].get('object_key', object_key)
 
 
-def _get_gcs_client(gcs_credentials):
-    if 'service_file' in gcs_credentials:
-        return gcs.Client.from_service_account_json(gcs_credentials['service_file'])
-    return gcs.Client()
-
-
-def _transfer_dataset(client, bucket, dataset, prefix=None, retry_errors=3):
-    download_url, size_gb, billing, object_key = _get_dataset_url(dataset)
+def _transfer_dataset(client, bucket, dataset, prefix=None, retry_errors=3, api_key=None):
+    download_url, size_gb, billing, object_key = _get_dataset_url(dataset, api_key=api_key)
 
     key = object_key.strip("/") or f"{dataset}.download"
     if prefix:
@@ -48,30 +41,24 @@ def _transfer_dataset(client, bucket, dataset, prefix=None, retry_errors=3):
         try:
             request = urllib.request.Request(download_url, headers={'User-Agent': 'datamule-python'})
             with urllib.request.urlopen(request) as response:
-                content_type = response.headers.get('Content-Type', 'application/octet-stream')
-                blob = bucket.blob(key)
-                blob.metadata = {
-                    'source-url': download_url,
-                    'transfer-date': datetime.now(timezone.utc).isoformat(),
-                }
-                blob.upload_from_file(response, content_type=content_type)
-                return {'success': True, 'dataset': dataset, 'size_bytes': blob.size, 'billing': billing}
+                size = _upload_response(bucket, key, response, download_url)
+                return {'success': True, 'dataset': dataset, 'size_bytes': size, 'billing': billing}
         except Exception as e:
             if attempt < retry_errors:
-                download_url, _, _, _ = _get_dataset_url(dataset)
+                download_url, _, _, _ = _get_dataset_url(dataset, api_key=api_key)
             last_error = e
 
     return {'success': False, 'dataset': dataset, 'error': str(last_error)}
 
 
-def datasets_transfer(datasets, gcs_credentials, errors_json_filename='errors_datasets_transfer.json', retry_errors=3, prefix=None):
+def transfer_dataset(datasets, gcs_credentials, errors_json_filename='errors_datasets_transfer.json', retry_errors=3, prefix=None, api_key=None):
     client = _get_gcs_client(gcs_credentials)
     bucket = client.bucket(gcs_credentials['bucket_name'])
 
     failed, total_bytes = [], 0
     with tqdm(total=len(datasets), desc="Transferring datasets", unit="dataset") as pbar:
         for dataset in datasets:
-            result = _transfer_dataset(client, bucket, dataset, prefix, retry_errors)
+            result = _transfer_dataset(client, bucket, dataset, prefix, retry_errors, api_key=api_key)
             if result['success']:
                 total_bytes += result.get('size_bytes', 0)
             else:

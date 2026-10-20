@@ -26,6 +26,10 @@ Current source values are:
 The Python client defaults to all sources. To exclude anticipated filings, pass `sources=["Rss", "Efts"]`. Note that if `anticipate` is enabled, filings will emit twice. First if anticipated, second when RSS/EFTS detects the filing. If only RSS and EFTS is enabled, filings will emit once.
 
 ## Usage 
+
+All webhook functions accept `api_key` explicitly. If omitted, they read
+`DATAMULE_API_KEY` from the environment when called.
+
 ```python
 from datamulehub import sec_filings_notifications
 

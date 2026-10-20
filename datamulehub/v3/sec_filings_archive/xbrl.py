@@ -3,8 +3,8 @@ from pathlib import Path
 
 from ...api_key import get_api_key
 from ...utils.xbrl import iter_xbrl_filings, normalize_accessions
-from ..sec_filings_archive import _rust
-from ..sec_filings_archive.utils import prepare_output_dir, validate_tar_max_size_mb
+from . import _rust
+from .utils import prepare_output_dir, validate_tar_max_size_mb
 
 
 DEFAULT_MAX_WORKERS = 100

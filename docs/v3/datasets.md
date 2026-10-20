@@ -32,9 +32,13 @@ When there are no per-filing files, `delta` writes an empty Parquet file contain
 Accepted dataset names:
 
 - exact S3 object keys, such as `datasets/simple_xbrl/data.parquet`
-- XML table shorthand, such as `dos` or `xml2tables/dos`
+- XML table shorthand, such as `dos`, `xml2tables/dos`, or `xmltables/dos`
 - metadata aliases, such as `sec_master_submissions`, `filer_metadata`, and `filer_names`
 - `simple_xbrl`
+
+`xmltables/345`, `xml2tables/345`, and `345` all resolve to
+`datasets/xml2tables/345/data.parquet`. This alias also works with the S3 and GCS
+dataset transfer helpers.
 
 The function returns metadata:
 
@@ -49,20 +53,47 @@ The function returns metadata:
 }
 ```
 
-## Simple XBRL by accession
+## Datasets by accession
+
+Accession downloads support `simple_xbrl`, XML tables (including `xmltables/345`
+and `xml2tables/345`), and the per-filing metadata tables `filing_metadata_filings`,
+`filing_metadata_entities`, `filing_metadata_former_companies`,
+`filing_metadata_series`, and `filing_metadata_classes`.
+
+```python
+datasets.download(
+    "xmltables/345",
+    accession=["0000320193-24-000123"],
+    filename="filing_345.parquet",
+)
+
+datasets.download(
+    "filing_metadata_filings",
+    accession=["0000320193-24-000123"],
+    filename="filing_metadata.parquet",
+)
+```
 
 Supply `accession` as a non-empty list, including for one filing. List items may
 be dashed strings, undashed strings, or integer accession numbers. Duplicate
 accessions are removed. Scalars, tuples, empty lists, and invalid accession
 numbers are rejected before lookup or download.
 
-The client resolves filing dates and downloads the individual simple XBRL Parquet
-objects for those filings, then combines them into one output file. This supports
-historical filings and is independent of the daily/delta time window. This mode
+The client resolves filing dates and downloads the individual Parquet objects for
+the requested dataset and filings, then combines them into one output file. XML
+table lookups select matching document types; they do not require XBRL. Historical
+filings are supported where per-filing objects are still available, independently
+of the daily/delta time window. This mode
 does not download the combined dataset and cannot use `from_storage="daily"`.
 The default `both` and explicit `delta` both select per-filing objects in this mode.
 
 The return value also includes `accession` (normalized accession numbers),
 `object_keys` (downloaded per-filing keys), and `missing_accessions`. `object_key`
 is None because the result combines individual objects. If no files are available,
-the result is an empty Parquet file with the simple XBRL schema.
+the result is an empty Parquet file: simple XBRL retains its normal empty schema;
+XML and metadata results contain only the `_sourceKey` column. Missing lookup
+results and missing per-filing objects are listed in `missing_accessions`.
+
+Snapshot-only datasets such as `filer_metadata` and `submissions_metadata` do not
+support accession selection. The default output filename for accession downloads
+is `simple_xbrl.parquet` or `<table>.parquet`.

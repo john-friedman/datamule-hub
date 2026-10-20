@@ -28,8 +28,8 @@ async def _get_dataset_url(session, dataset, api_key=None):
     return data['data']['download_url'], data['data']['size_gb'], billing, data['data'].get('object_key', object_key)
 
 
-async def _transfer_dataset(session, s3_client, semaphore, dataset, bucket, prefix=None, retry_errors=3, multipart_threshold_mb=100, chunk_size_mb=8):
-    download_url, size_gb, billing, object_key = await _get_dataset_url(session, dataset)
+async def _transfer_dataset(session, s3_client, semaphore, dataset, bucket, prefix=None, retry_errors=3, multipart_threshold_mb=100, chunk_size_mb=8, api_key=None):
+    download_url, size_gb, billing, object_key = await _get_dataset_url(session, dataset, api_key=api_key)
 
     key = object_key.strip("/") or f"{dataset}.download"
     if prefix:
@@ -98,14 +98,14 @@ async def _transfer_dataset(session, s3_client, semaphore, dataset, bucket, pref
                     except Exception:
                         pass
                 if attempt < retry_errors:
-                    download_url, _, _, _ = await _get_dataset_url(session, dataset)
+                    download_url, _, _, _ = await _get_dataset_url(session, dataset, api_key=api_key)
                     await asyncio.sleep(2 ** attempt)
                 last_error = e
 
         return {'success': False, 'dataset': dataset, 'error': str(last_error)}
 
 
-async def _transfer_datasets(datasets, s3_credentials, max_workers, retry_errors, prefix=None):
+async def _transfer_datasets(datasets, s3_credentials, max_workers, retry_errors, prefix=None, api_key=None):
     connector = aiohttp.TCPConnector(limit=max_workers, ssl=ssl.create_default_context())
     async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=7200)) as session:
         async with aioboto3.Session().client(
@@ -115,7 +115,7 @@ async def _transfer_datasets(datasets, s3_credentials, max_workers, retry_errors
             region_name=s3_credentials['region_name']
         ) as s3_client:
             semaphore = asyncio.Semaphore(max_workers)
-            tasks = [_transfer_dataset(session, s3_client, semaphore, d, s3_credentials['bucket_name'], prefix, retry_errors) for d in datasets]
+            tasks = [_transfer_dataset(session, s3_client, semaphore, d, s3_credentials['bucket_name'], prefix, retry_errors, api_key=api_key) for d in datasets]
 
             failed, total_bytes = [], 0
             with tqdm(total=len(datasets), desc="Transferring datasets", unit="dataset") as pbar:
@@ -131,8 +131,8 @@ async def _transfer_datasets(datasets, s3_credentials, max_workers, retry_errors
             return failed
 
 
-def datasets_transfer(datasets, s3_credentials, max_workers=4, errors_json_filename='errors_datasets_transfer.json', retry_errors=3, prefix=None):
-    failed = asyncio.run(_transfer_datasets(datasets, s3_credentials, max_workers, retry_errors, prefix=prefix))
+def transfer_dataset(datasets, s3_credentials, max_workers=4, errors_json_filename='errors_datasets_transfer.json', retry_errors=3, prefix=None, api_key=None):
+    failed = asyncio.run(_transfer_datasets(datasets, s3_credentials, max_workers, retry_errors, prefix=prefix, api_key=api_key))
 
     if failed and errors_json_filename:
         with open(errors_json_filename, 'w') as f:

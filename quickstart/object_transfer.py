@@ -12,19 +12,17 @@ gcs_credentials = {
 }
 
 # transfer filings
-object_transfer.gcs_archive_transfer(
-    datamule_bucket='sec_filings_sgml_r2',
+object_transfer.transfer_sgml_archive_gcs(
     gcs_credentials=gcs_credentials,
     cik=320193,
     submission_type='10-K',
     filing_date=('2020-01-01', '2024-01-01'),
-    force_daily=True,
     prefix = ""
 )
 input("Proceed?")
 
 # transfer datasets
-object_transfer.gcs_dataset_transfer(
+object_transfer.transfer_dataset_gcs(
     datasets=['xml2tables/dos'],
     gcs_credentials=gcs_credentials,
     prefix = ""
@@ -32,27 +30,44 @@ object_transfer.gcs_dataset_transfer(
 input("Proceed?")
 
 s3_credentials = {
-    's3_provider': 'aws',
     'aws_access_key_id': 'YOUR_KEY',
     'aws_secret_access_key': 'YOUR_SECRET',
     'region_name': 'us-east-1',
     'bucket_name': 'your-bucket'
 }
 
-object_transfer.s3_archive_transfer(
-    datamule_bucket='sec_filings_sgml_r2',
+object_transfer.transfer_sgml_archive_s3(
     s3_credentials=s3_credentials,
     cik=320193,
     submission_type='10-K',
     filing_date=('2001-01-01','2024-01-01'),
-    force_daily=False,
     prefix = ""
 )
 input("Proceed?")
 
 # transfer datasets
-object_transfer.s3_dataset_transfer(
+object_transfer.transfer_dataset_s3(
     datasets=['xml2tables/dos'],
     s3_credentials=s3_credentials,
     prefix = ""
+)
+
+# Transfer whole submission TARs instead of SGML.
+input("Proceed with TAR transfer?")
+object_transfer.transfer_tar_archive_s3(
+    s3_credentials=s3_credentials,
+    cik=320193,
+    submission_type='10-K',
+    filing_date=('2020-01-01', '2024-01-01'),
+    prefix="sec-filings",
+)
+
+# Transfer full XBRL facts (.json.zst).
+input("Proceed with XBRL transfer?")
+object_transfer.transfer_xbrl_archive_s3(
+    s3_credentials=s3_credentials,
+    cik=320193,
+    submission_type='10-K',
+    filing_date=('2020-01-01', '2024-01-01'),
+    prefix="sec-filings",
 )
