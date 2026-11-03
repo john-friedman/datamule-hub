@@ -1,5 +1,13 @@
 # Datamule Hub
 
-Python package for Datamule cloud APIs. [Documentation](http://datamule.xyz/docs)
+Making it easy to use SEC data, using [Datamule's](https://datamule.xyz/) API. [Documentation](http://datamule.xyz/docs).
 
-Note: Replaces [datamule-python](https://github.com/john-friedman/datamule-python).
+Python
+```
+pip install datamule-hub
+```
+
+Typescript
+```
+npm install datamulehub
+```

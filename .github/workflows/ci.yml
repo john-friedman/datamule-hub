@@ -1,0 +1,129 @@
+name: Build Python and TypeScript
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python package release version (empty uses setup.py)
+        type: string
+        default: ""
+      typescript-version:
+        description: TypeScript package release version (empty uses package.json)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  DATAMULE_VERSION: ${{ inputs.python-version || '' }}
+
+jobs:
+  build-wheels:
+    name: Build Python ${{ matrix.name }} wheel
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            arch: x86_64
+            macos_environment: ""
+          - name: windows-x86_64
+            os: windows-latest
+            arch: AMD64
+            macos_environment: ""
+          - name: macos-x86_64
+            os: macos-15-intel
+            arch: x86_64
+            macos_environment: MACOSX_DEPLOYMENT_TARGET=10.12
+          - name: macos-arm64
+            os: macos-latest
+            arch: arm64
+            macos_environment: MACOSX_DEPLOYMENT_TARGET=11.0
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install Rust
+        if: runner.os != 'Linux'
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cibuildwheel
+        run: python -m pip install cibuildwheel==4.2.1
+      - name: Build and check installed wheel
+        working-directory: python
+        run: python -m cibuildwheel --output-dir ../wheelhouse
+        env:
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_ENVIRONMENT_MACOS: ${{ matrix.macos_environment }}
+          CIBW_TEST_COMMAND: >-
+            python -c "from datamulehub.v3.sec_filings_archive._rust import require_binary; assert require_binary().is_file()"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: python-wheel-${{ matrix.name }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  build-sdist:
+    name: Build Python source distribution
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Build and validate source distribution
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build --sdist
+          python -m twine check dist/*
+      - uses: actions/upload-artifact@v6
+        with:
+          name: python-source-distribution
+          path: python/dist/*.tar.gz
+          if-no-files-found: error
+
+  build-typescript:
+    name: Build TypeScript package
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: typescript
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Set release version
+        if: inputs.typescript-version != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.typescript-version }}
+        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version --ignore-scripts
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build and pack
+        run: |
+          mkdir -p ../typescript-package
+          npm pack --pack-destination ../typescript-package
+      - name: Run regression tests
+        run: node --test
+      - name: Check package exports
+        run: >-
+          node --input-type=module -e "const hub = await import('./dist/index.js'); if (!hub.sec_filings_lookup || !hub.datasets) throw new Error('Missing package exports');"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: typescript-package
+          path: typescript-package/*.tgz
+          if-no-files-found: error

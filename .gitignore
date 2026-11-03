@@ -34,3 +34,29 @@ target/
 Thumbs.db
 .vscode/
 .idea/
+
+# TypeScript dependencies and generated output
+node_modules/
+.npm-cache/
+*.tsbuildinfo
+*.tgz
+
+# Local credentials and data
+.env
+.env.*
+!.env.example
+.npmrc
+credentials*.json
+service_account*.json
+*.pem
+*.key
+downloads/
+datamule-query-result/
+*.parquet
+*.tar
+*.tar.gz
+*.sgml
+*.zst
+errors_*transfer.json
+*.partial-*
+*.log

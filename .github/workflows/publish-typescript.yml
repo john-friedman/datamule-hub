@@ -1,0 +1,63 @@
+name: Publish TypeScript to npm
+
+on:
+  push:
+    tags: ["typescript-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Validate TypeScript release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Read version from tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#typescript-v}"
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Expected a tag such as typescript-v0.2.20 or typescript-v0.2.20-rc.1"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    with:
+      typescript-version: ${{ needs.version.outputs.version }}
+
+  publish:
+    name: Publish to npm
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11
+      - uses: actions/download-artifact@v6
+        with:
+          name: typescript-package
+          path: typescript-package
+      - name: Publish built package
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            npm publish ./typescript-package/*.tgz --access public --tag next
+          else
+            npm publish ./typescript-package/*.tgz --access public --tag latest
+          fi
