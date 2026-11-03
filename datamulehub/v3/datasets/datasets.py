@@ -20,6 +20,7 @@ from .document_types import DOCUMENT_TYPES_BY_TABLE
 
 
 API_BASE_URL = "https://api.datamule.xyz"
+EASTERN = ZoneInfo("America/New_York")
 DELTA_RETRY_SECONDS = 3
 DELTA_DOWNLOAD_WORKERS = 32
 DELTA_REQUEST_TIMEOUT_SECONDS = 30
@@ -197,27 +198,6 @@ def _source_key(table, filing_date, accession):
     return f"sec-filings/{prefix}/{filing_date}/{table}/{accession}.parquet"
 
 
-def _snapshot_keys(path, table, candidates):
-    import pyarrow.parquet as pq
-
-    if not candidates:
-        return candidates
-    parquet = pq.ParquetFile(path)
-    fields = parquet.schema_arrow.names
-    if "_sourceKey" in fields:
-        for batch in parquet.iter_batches(columns=["_sourceKey"], batch_size=65536):
-            candidates.difference_update(value for value in batch.column(0).to_pylist() if value)
-    if candidates and "filingDate" in fields and "accessionNumber" in fields:
-        for batch in parquet.iter_batches(columns=["filingDate", "accessionNumber"], batch_size=65536):
-            dates = batch.column(0).to_pylist()
-            accessions = batch.column(1).to_pylist()
-            for filing_date, accession in zip(dates, accessions):
-                if filing_date is None or accession is None:
-                    continue
-                candidates.discard(_source_key(table, filing_date, accession))
-    return candidates
-
-
 def _dataset_filing_filters(table):
     if table is None:
         return {"contains_xbrl": True}
@@ -229,11 +209,12 @@ def _dataset_filing_filters(table):
     return {"document_type": document_types}
 
 
-def _delta_keys_for_date(table, filing_date, api_key):
+def _delta_keys_for_dates(table, filing_dates, api_key):
     keys = set()
-    for data in stream_sgml(filing_date=filing_date, api_key=api_key, **_dataset_filing_filters(table)):
-        for accession in data.get("accession", []):
-            keys.add(_source_key(table, filing_date, accession))
+    for filing_date in filing_dates:
+        for data in stream_sgml(filing_date=filing_date, api_key=api_key, **_dataset_filing_filters(table)):
+            for accession in data.get("accession", []):
+                keys.add(_source_key(table, filing_date, accession))
     return keys
 
 
@@ -261,13 +242,22 @@ def _accession_keys(table, accession, api_key):
     return keys
 
 
-def _delta_filing_date(et_now):
-    minutes = et_now.hour * 60 + et_now.minute
-    if minutes < 150:
-        return (et_now.date() - timedelta(days=1)).isoformat()
-    if minutes < 390:
-        return None
-    return et_now.date().isoformat()
+def _last_delta_filing_date(et_now):
+    if et_now.hour < 6:
+        return et_now.date() - timedelta(days=1)
+    return et_now.date()
+
+
+def _delta_filing_dates(last_modified, et_now):
+    if last_modified is None:
+        raise ValueError("Daily download link is missing last_modified.")
+    # Each overnight snapshot contains all filing days before its Eastern publication date.
+    first = datetime.fromtimestamp(last_modified, EASTERN).date()
+    last = _last_delta_filing_date(et_now)
+    return [
+        (first + timedelta(days=offset)).isoformat()
+        for offset in range((last - first).days + 1)
+    ]
 
 
 def _delta_link(key, api_key):
@@ -444,20 +434,25 @@ def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_
     if from_storage == "delta" and not has_delta:
         raise ValueError("from_storage='delta' requires a metadata table, XML table or simple_xbrl dataset")
 
-    et_now = datetime.now().astimezone(ZoneInfo("America/New_York")) if has_delta else None
-    filing_date = _delta_filing_date(et_now) if et_now and from_storage != "daily" else None
     include_daily = from_storage != "delta"
-    lookup_executor = ThreadPoolExecutor(max_workers=1) if include_daily and filing_date else None
+    link = get_link(object_key, api_key=api_key) if include_daily else None
+    filing_dates = []
+    if has_delta and from_storage != "daily":
+        et_now = datetime.now(EASTERN)
+        filing_dates = (
+            _delta_filing_dates(link["last_modified"], et_now)
+            if include_daily else [_last_delta_filing_date(et_now).isoformat()]
+        )
+    lookup_executor = ThreadPoolExecutor(max_workers=1) if include_daily and filing_dates else None
     try:
         lookup_future = (
-            lookup_executor.submit(_delta_keys_for_date, table, filing_date, api_key)
+            lookup_executor.submit(_delta_keys_for_dates, table, filing_dates, api_key)
             if lookup_executor else None
         )
-        link = get_link(object_key, api_key=api_key) if include_daily else None
         output = filename or _filename_from_path(link["object_key"] if link else object_key)
         links = [link] if link else []
 
-        if include_daily and filing_date is None:
+        if include_daily and not filing_dates:
             output = _download_link(link, output, chunk_size, accept_filename=filename is None)
         else:
             output_path = Path(output).resolve()
@@ -468,12 +463,10 @@ def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_
                     _download_link(link, snapshot_path, chunk_size)
                 if lookup_future:
                     candidates = lookup_future.result()
-                elif filing_date:
-                    candidates = _delta_keys_for_date(table, filing_date, api_key)
+                elif filing_dates:
+                    candidates = _delta_keys_for_dates(table, filing_dates, api_key)
                 else:
                     candidates = set()
-                if snapshot_path:
-                    _snapshot_keys(snapshot_path, table, candidates)
                 additions, delta_links = _download_delta_files(candidates, directory, api_key, chunk_size)
                 links.extend(delta_links)
                 if snapshot_path and not additions:

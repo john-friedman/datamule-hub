@@ -93,7 +93,9 @@ def _extract_result_files(download_path, output_dir):
     return files
 
 
-def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 * 1024):
+def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 * 1024, from_storage="both"):
+    if from_storage not in ("both", "daily", "delta"):
+        raise ValueError("from_storage must be 'both', 'daily', or 'delta'")
     if is_fastest_metadata_query(sql):
         return download_fastest_metadata_query(
             sql,
@@ -102,7 +104,7 @@ def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 
         )
 
     key = get_api_key(api_key)
-    body = {"query": sql}
+    body = {"query": sql, "from_storage": from_storage}
     if wait_seconds is not None:
         body["wait_seconds"] = wait_seconds
 
@@ -228,7 +230,9 @@ def _read_result_table(path):
     return _read_parquet(path)
 
 
-def read_query(sql, api_key=None, wait_seconds=600):
+def read_query(sql, api_key=None, wait_seconds=600, from_storage="both"):
+    if from_storage not in ("both", "daily", "delta"):
+        raise ValueError("from_storage must be 'both', 'daily', or 'delta'")
     if is_fastest_metadata_query(sql):
         return read_fastest_metadata_query(sql, api_key=api_key)
 
@@ -238,6 +242,7 @@ def read_query(sql, api_key=None, wait_seconds=600):
             output_dir=tmp_dir,
             api_key=api_key,
             wait_seconds=wait_seconds,
+            from_storage=from_storage,
         )
         table = _read_result_table(result["output_dir"])
         return table.to_pylist()
