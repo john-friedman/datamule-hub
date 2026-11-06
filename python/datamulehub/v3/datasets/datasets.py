@@ -45,12 +45,31 @@ DATASET_PATH_MAP = {
 DATASET_PATH_MAP.update({table: f"datasets/metadata/{table}/data.parquet" for table in METADATA_TABLES})
 
 
-def resolve_path(dataset):
+STANDARDIZED_TEXT_PREFIX = "datasets/standardized_text/doc2struct/"
+STANDARDIZED_TEXT_SOURCE_PREFIX = "sec-filings/standardized_text/doc2struct/"
+
+
+def _standardized_text_year(year):
+    if isinstance(year, bool) or str(year) != str(int(year)):
+        raise ValueError("year must be a four-digit filing year")
+    year = int(year)
+    if not 1993 <= year <= datetime.now(EASTERN).year:
+        raise ValueError("year must be between 1993 and the current filing year")
+    return year
+
+
+def resolve_path(dataset, year=None):
     value = str(dataset or "").strip().strip("/")
     if not value:
         raise ValueError("dataset is required.")
 
     key = value.lower().replace("-", "_")
+    if key == "standardized_text":
+        if year is None:
+            raise ValueError("year is required for a single standardized_text download link")
+        return f"{STANDARDIZED_TEXT_PREFIX}{_standardized_text_year(year)}.parquet"
+    if year is not None:
+        raise ValueError("year is only supported for standardized_text")
     if key in DATASET_PATH_MAP:
         return DATASET_PATH_MAP[key]
 
@@ -106,9 +125,9 @@ def _urlopen(request, timeout=None):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
-def get_link(dataset, api_key=None, timeout=None):
+def get_link(dataset, api_key=None, timeout=None, year=None):
     key = get_api_key(api_key)
-    object_key = resolve_path(dataset)
+    object_key = resolve_path(dataset, year=year)
     body = json.dumps({"path": object_key}).encode("utf-8")
     request = urllib.request.Request(
         f"{API_BASE_URL}/v3/get-s3-link",
@@ -192,6 +211,8 @@ def _metadata_table_name(object_key):
 
 def _source_key(table, filing_date, accession):
     accession = format_accession(accession, "no-dash")
+    if table == "standardized_text":
+        return f"{STANDARDIZED_TEXT_SOURCE_PREFIX}{filing_date}/{accession}.parquet"
     if table is None:
         return f"sec-filings/simple_xbrl/{filing_date}/{accession}.parquet"
     prefix = "metadata" if table in METADATA_TABLES else "xml2tables"
@@ -199,6 +220,8 @@ def _source_key(table, filing_date, accession):
 
 
 def _dataset_filing_filters(table):
+    if table == "standardized_text":
+        return {}
     if table is None:
         return {"contains_xbrl": True}
     if table in METADATA_TABLES:
@@ -382,11 +405,13 @@ def _merge_parquet(sources, output_path):
                 writer.write_batch(pa.RecordBatch.from_arrays(arrays, schema=schema))
 
 
-def _download_accessions(table, accession, filename, api_key, chunk_size):
+def _download_accessions(table, accession, filename, api_key, chunk_size, year=None):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     candidates = _accession_keys(table, accession, api_key)
+    if year is not None:
+        candidates = {key for key in candidates if key.startswith(f"{STANDARDIZED_TEXT_SOURCE_PREFIX}{year}-")}
     output = filename or f"{table or 'simple_xbrl'}.parquet"
     output_path = Path(output).resolve()
     with tempfile.TemporaryDirectory(dir=output_path.parent) as directory:
@@ -394,6 +419,8 @@ def _download_accessions(table, accession, filename, api_key, chunk_size):
         merged_path = Path(directory) / "merged.parquet"
         if additions:
             _merge_parquet([(path, key) for path, key in additions], merged_path)
+        elif table == "standardized_text":
+            pq.write_table(pa.Table.from_batches([], schema=_standardized_text_schema()), merged_path, compression="zstd")
         elif table is None:
             schema = pa.schema([
                 pa.field("accessionNumber", pa.uint64()),
@@ -417,10 +444,87 @@ def _download_accessions(table, accession, filename, api_key, chunk_size):
     return result
 
 
-def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_storage="both", accession=None):
+def _standardized_text_schema():
+    import pyarrow as pa
+    numbers = {"accessionNumber", "sequence", "id", "level"}
+    matrix = pa.list_(pa.list_(pa.string()))
+    names = ["accessionNumber", "sequence", "filingDate", "filename", "documentType", "id", "level", "type", "text", "matrix", "cleaned", "preamble", "footnotes", "postamble", "class", "standardizedTitle", "_sourceKey"]
+    return pa.schema([
+        pa.field(name, pa.uint64() if name in numbers else matrix if name in ("matrix", "footnotes") else pa.list_(pa.string()) if name == "cleaned" else pa.string())
+        for name in names
+    ])
+
+
+def _download_standardized_text_year(year, filename, api_key, chunk_size, from_storage):
+    object_key = resolve_path("standardized_text", year=year)
+    output = filename or f"standardized_text-{year}.parquet"
+    output_path = Path(output).resolve()
+    link = get_link(object_key, api_key=api_key) if from_storage != "delta" else None
+    links = [link] if link else []
+    if from_storage == "daily":
+        _download_link(link, output, chunk_size)
+    else:
+        now = datetime.now(EASTERN)
+        dates = (_delta_filing_dates(link["last_modified"], now) if link else [_last_delta_filing_date(now).isoformat()])
+        dates = [date for date in dates if date.startswith(f"{year}-")]
+        with tempfile.TemporaryDirectory(dir=output_path.parent) as directory:
+            snapshot = None
+            if link:
+                snapshot = Path(directory) / "snapshot.parquet"
+                _download_link(link, snapshot, chunk_size)
+            keys = _delta_keys_for_dates("standardized_text", dates, api_key)
+            additions, delta_links = _download_delta_files(keys, directory, api_key, chunk_size)
+            links.extend(delta_links)
+            if snapshot and not additions:
+                os.replace(snapshot, output_path)
+            elif snapshot or additions:
+                merged = Path(directory) / "merged.parquet"
+                _merge_parquet(([(snapshot, None)] if snapshot else []) + additions, merged)
+                os.replace(merged, output_path)
+            else:
+                import pyarrow as pa
+                import pyarrow.parquet as pq
+                pq.write_table(pa.Table.from_batches([], schema=_standardized_text_schema()), output_path, compression="zstd")
+    return _download_result(output, object_key, links)
+
+
+def _download_standardized_text(year, filename, api_key, chunk_size, from_storage, accession):
+    if accession is not None:
+        if from_storage == "daily":
+            raise ValueError("accession downloads use per-filing objects; from_storage='daily' is unavailable.")
+        return _download_accessions("standardized_text", normalize_accessions(accession), filename, api_key, chunk_size, year=year)
+    if year is not None:
+        return _download_standardized_text_year(year, filename, api_key, chunk_size, from_storage)
+    if from_storage == "delta":
+        year = _last_delta_filing_date(datetime.now(EASTERN)).year
+        return _download_standardized_text_year(year, filename, api_key, chunk_size, from_storage)
+    # A corpus download remains a directory of yearly files, never a giant merged file.
+    directory = Path(filename or "standardized_text")
+    if directory.suffix == ".parquet":
+        raise ValueError("Select year for one Parquet file, or use filename as a directory for all years")
+    directory.mkdir(parents=True, exist_ok=True)
+    results = []
+    for filing_year in range(1993, datetime.now(EASTERN).year + 1):
+        try:
+            results.append(_download_standardized_text_year(filing_year, str(directory / f"{filing_year}.parquet"), api_key, chunk_size, from_storage))
+        except ApiError as error:
+            if error.status != 404:
+                raise
+    if not results:
+        raise ValueError("No yearly standardized_text snapshots are available yet")
+    return {"files": [result["filename"] for result in results], "results": results, "cost": sum(result["cost"] for result in results)}
+
+
+def download(dataset, filename=None, api_key=None, chunk_size=1024 * 1024, from_storage="both", accession=None, year=None):
     if from_storage not in ("both", "daily", "delta"):
         raise ValueError("from_storage must be 'both', 'daily', or 'delta'")
 
+    if str(dataset).strip().strip("/").lower().replace("-", "_") == "standardized_text":
+        if year is not None:
+            year = _standardized_text_year(year)
+        return _download_standardized_text(year, filename, api_key, chunk_size, from_storage, accession)
+    if year is not None:
+        raise ValueError("year is only supported for standardized_text")
     object_key = resolve_path(dataset)
     table = _xml_table_name(object_key) or _metadata_table_name(object_key)
     if accession is not None:
