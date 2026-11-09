@@ -2,7 +2,7 @@ name: Publish TypeScript to npm
 
 on:
   push:
-    tags: ["typescript-v*"]
+    tags: ["v*"]
 
 permissions:
   contents: read
@@ -19,9 +19,9 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          version="${RELEASE_TAG#typescript-v}"
+          version="${RELEASE_TAG#v}"
           if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Expected a tag such as typescript-v0.2.20 or typescript-v0.2.20-rc.1"
+            echo "Expected a tag such as v0.2.22 or v0.2.22-rc.1"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"

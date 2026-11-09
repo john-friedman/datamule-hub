@@ -2,7 +2,7 @@ name: Publish Python to PyPI
 
 on:
   push:
-    tags: ["python-v*"]
+    tags: ["v*"]
 
 permissions:
   contents: read
@@ -25,7 +25,7 @@ jobs:
           import os
           from packaging.version import Version
 
-          version = str(Version(os.environ["GITHUB_REF_NAME"].removeprefix("python-v")))
+          version = str(Version(os.environ["GITHUB_REF_NAME"].removeprefix("v")))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"version={version}\n")
 
