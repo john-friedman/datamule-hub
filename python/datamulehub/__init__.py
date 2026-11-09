@@ -1,3 +1,4 @@
+from .v3 import cloud
 from . import object_transfer
 from .v3 import databases
 from .v3 import datasets
@@ -6,6 +7,7 @@ from .v3 import sec_filings_lookup
 from .v3 import sec_filings_notifications
 
 __all__ = [
+    "cloud",
     "databases",
     "datasets",
     "object_transfer",

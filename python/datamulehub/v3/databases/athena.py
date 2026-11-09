@@ -1,16 +1,15 @@
-import json
 import logging
+import math
 import shutil
 import tarfile
 import tempfile
+import time
 import urllib.error
-import urllib.request
-from email.message import Message
 from pathlib import Path
 
-from tqdm import tqdm
-
-from ...api_key import _format_api_key_credits, get_api_key
+from ...api_key import get_api_key
+from .. import cloud
+from ..cloud.cloud import _request_json
 from .fastest import (
     download_fastest_metadata_query,
     is_fastest_metadata_query,
@@ -18,170 +17,89 @@ from .fastest import (
 )
 
 
-API_BASE_URL = "https://api.datamule.xyz"
 logger = logging.getLogger(__name__)
 
 
-def _api_error(exc):
-    body = exc.read().decode("utf-8", errors="replace")
-    try:
-        payload = json.loads(body)
-        message = payload.get("error", body)
-    except json.JSONDecodeError:
-        message = body
-    return Exception(f"API request failed ({exc.code}): {message}")
+class QueryTimeoutError(TimeoutError):
+    def __init__(self, job_id):
+        self.job_id = job_id
+        super().__init__(
+            f"Stopped waiting for Athena job {job_id}. The job continues running. "
+            "Use cloud.get(job_id) and cloud.download(job_id) to retrieve it later."
+        )
 
 
-def _content_disposition_filename(value):
-    if not value:
-        return None
+def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 * 1024,
+          from_storage="both", wait=True, poll_interval_ms=1000):
+    """Submit SQL and download the result, or return the job ID with wait=False.
 
-    message = Message()
-    message["content-disposition"] = value
-    filename = message.get_param("filename", header="content-disposition")
-    return filename.strip("\"") if filename else None
-
-
-def _float_header(headers, name):
-    value = headers.get(name)
-    if value is None:
-        return None
-    return float(value)
-
-
-def _transport_filename(headers):
-    filename = _content_disposition_filename(headers.get("Content-Disposition"))
-    if filename:
-        return filename
-
-    content_type = headers.get("Content-Type", "")
-    if "parquet" in content_type:
-        return "athena-result.parquet"
-    return "athena-results.tar"
-
-
-def _part_name(index):
-    return f"part-{index:05d}.parquet"
-
-
-def _extract_result_files(download_path, output_dir):
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    files = []
-
-    if tarfile.is_tarfile(download_path):
-        with tarfile.open(download_path, "r") as archive:
-            index = 0
-            for member in archive.getmembers():
-                if not member.isfile():
-                    continue
-
-                source = archive.extractfile(member)
-                if source is None:
-                    continue
-
-                target = output_dir / _part_name(index)
-                with open(target, "wb") as file:
-                    shutil.copyfileobj(source, file)
-                files.append(str(target))
-                index += 1
-        return files
-
-    target = output_dir / _part_name(0)
-    shutil.move(str(download_path), target)
-    files.append(str(target))
-    return files
-
-
-def query(sql, output_dir=None, api_key=None, wait_seconds=600, chunk_size=1024 * 1024, from_storage="both"):
+    wait_seconds limits local polling; None waits indefinitely. A timeout never
+    cancels the server job. poll_interval_ms defaults to 1000 milliseconds.
+    The fastest metadata table uses its existing service.
+    """
     if from_storage not in ("both", "daily", "delta"):
         raise ValueError("from_storage must be 'both', 'daily', or 'delta'")
+    if not isinstance(wait, bool):
+        raise ValueError("wait must be True or False")
+    if wait_seconds is not None and (
+        isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float))
+        or not math.isfinite(wait_seconds) or wait_seconds < 0
+    ):
+        raise ValueError("wait_seconds must be a nonnegative number or None")
+    if (
+        isinstance(poll_interval_ms, bool) or not isinstance(poll_interval_ms, (int, float))
+        or not math.isfinite(poll_interval_ms) or poll_interval_ms <= 0
+    ):
+        raise ValueError("poll_interval_ms must be a positive number of milliseconds")
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
+        raise ValueError("chunk_size must be a positive integer")
     if is_fastest_metadata_query(sql):
-        return download_fastest_metadata_query(
-            sql,
-            output_dir=output_dir,
-            api_key=api_key,
-        )
+        if not wait:
+            raise ValueError("wait=False is only available for Athena queries")
+        return download_fastest_metadata_query(sql, output_dir=output_dir, api_key=api_key)
 
     key = get_api_key(api_key)
-    body = {"query": sql, "from_storage": from_storage}
-    if wait_seconds is not None:
-        body["wait_seconds"] = wait_seconds
-
-    request = urllib.request.Request(
-        f"{API_BASE_URL}/v3/athena/download",
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Accept": "application/octet-stream",
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "User-Agent": "datamule-hub",
-        },
-        method="POST",
+    submitted = _request_json(
+        "/v3/athena/query", api_key=key,
+        body={"query": sql, "from_storage": from_storage, "wait_seconds": 0},
     )
+    job_id = submitted["query_id"]
+    logger.info("Submitted Athena job %s", job_id)
+    if not wait:
+        return {**submitted, "job_id": job_id}
 
-    try:
-        with urllib.request.urlopen(request) as response:
-            destination_dir = Path(output_dir or "datamule-query-result")
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                download_path = Path(tmp_dir) / _transport_filename(response.headers)
-                total_size = int(response.headers.get("Content-Length", 0))
-
-                with open(download_path, "wb") as file, tqdm(
-                    total=total_size,
-                    unit="B",
-                    unit_scale=True,
-                    desc=download_path.name,
-                    disable=not logger.isEnabledFor(logging.INFO),
-                ) as progress:
-                    while True:
-                        chunk = response.read(chunk_size)
-                        if not chunk:
-                            break
-                        file.write(chunk)
-                        progress.update(len(chunk))
-
-                files = _extract_result_files(download_path, destination_dir)
-            headers = response.headers
-    except urllib.error.HTTPError as exc:
-        raise _api_error(exc) from exc
-
-    scan_charge = _float_header(headers, "x-datamule-athena-scan-charge")
-    download_charge = _float_header(headers, "x-datamule-s3-download-charge")
-    total_charge = _float_header(headers, "x-datamule-total-charge")
-    remaining_balance = _float_header(headers, "x-datamule-remaining-balance")
-    api_key_credits = headers.get("x-datamule-remaining-api-key-credits")
-    remaining_api_key_credits = (
-        None if api_key_credits in (None, "unlimited") else float(api_key_credits)
-    )
-    query_id = headers.get("x-datamule-query-id")
-    billing = {
-        "athena_scan": scan_charge,
-        "s3_download": download_charge,
-        "total_charge": total_charge,
-        "remaining_balance": remaining_balance,
-    }
-    if api_key_credits is not None:
-        billing["remaining_api_key_credits"] = remaining_api_key_credits
-
-    logger.info("Downloaded query result to %s", destination_dir)
-    if total_charge is not None:
-        logger.info(
-            "Cost: $%.4f | Remaining balance: $%.2f%s",
-            total_charge,
-            remaining_balance,
-            _format_api_key_credits(billing),
-        )
-
-    return {
-        "output_dir": str(destination_dir),
-        "files": files,
-        "query_id": query_id,
-        "cost": total_charge,
-        "remaining_balance": remaining_balance,
-        "remaining_api_key_credits": remaining_api_key_credits,
-        "billing": billing,
-    }
+    poll_charge = 0
+    deadline = None if wait_seconds is None else time.monotonic() + wait_seconds
+    while True:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            raise QueryTimeoutError(job_id)
+        try:
+            job = cloud.get(job_id, api_key=key, timeout=30 if remaining is None else min(30, remaining))
+        except (TimeoutError, urllib.error.URLError) as exc:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise QueryTimeoutError(job_id) from exc
+            raise
+        poll_charge = round(poll_charge + job.get("request_billing", {}).get("total_charge", 0), 12)
+        if job["status"] in ("FAILED", "CANCELLED"):
+            raise cloud.ApiError(
+                409, f"Athena query {job['status'].lower()}: {job.get('state_change_reason') or 'No reason provided'}",
+                job_id=job_id, details=job,
+            )
+        if job["status"] == "SUCCEEDED" and job["billing_status"] == "SETTLED":
+            result = cloud.download(job_id, output_dir=output_dir, api_key=key, chunk_size=chunk_size)
+            scan_charge = job["billing"]["total_charge"]
+            result["cost"] = round(scan_charge + result["cost"] + poll_charge, 12)
+            result["billing"] = {
+                **result["billing"], "athena_scan": scan_charge,
+                "cloud_get": poll_charge, "total_charge": result["cost"],
+            }
+            logger.info("Query %s total cost: $%.4f", job_id, result["cost"])
+            return result
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            raise QueryTimeoutError(job_id)
+        time.sleep(poll_interval_ms / 1000 if remaining is None else min(poll_interval_ms / 1000, remaining))
 
 
 def _read_parquet(path):
@@ -230,7 +148,7 @@ def _read_result_table(path):
     return _read_parquet(path)
 
 
-def read_query(sql, api_key=None, wait_seconds=600, from_storage="both"):
+def read_query(sql, api_key=None, wait_seconds=600, from_storage="both", poll_interval_ms=1000):
     if from_storage not in ("both", "daily", "delta"):
         raise ValueError("from_storage must be 'both', 'daily', or 'delta'")
     if is_fastest_metadata_query(sql):
@@ -243,6 +161,7 @@ def read_query(sql, api_key=None, wait_seconds=600, from_storage="both"):
             api_key=api_key,
             wait_seconds=wait_seconds,
             from_storage=from_storage,
+            poll_interval_ms=poll_interval_ms,
         )
         table = _read_result_table(result["output_dir"])
         return table.to_pylist()

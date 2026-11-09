@@ -1,3 +1,3 @@
-from .athena import query, read_query
+from .athena import QueryTimeoutError, query, read_query
 
-__all__ = ["query", "read_query"]
+__all__ = ["query", "read_query", "QueryTimeoutError"]
