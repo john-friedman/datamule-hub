@@ -81,7 +81,7 @@ function delta_dates(last_modified: number, now: Date): string[] {
   const last = last_delta_date(now);
   const dates: string[] = [];
   for (const date = new Date(`${first}T00:00:00Z`); date <= last; date.setUTCDate(date.getUTCDate() + 1)) {
-    dates.push(date.toISOString().slice(0, 10));
+    if (date.getUTCDay() !== 0 && date.getUTCDay() !== 6) dates.push(date.toISOString().slice(0, 10));
   }
   return dates;
 }
@@ -91,6 +91,7 @@ async function candidates(table: string | undefined, dates: string[], accessions
   if (table && !METADATA_TABLES.includes(table) && !DOCUMENT_TYPES_BY_TABLE[table]) throw new Error(`Unknown XML table: ${table}`);
   const result = new Set<string>();
   for (const date of accessions ? [undefined] : dates) {
+    if (date && [0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay())) continue;
     for await (const filing of filings({ ...options, ...filters, accession: accessions, filing_date: date }, !table)) {
       result.add(source_key(table, filing.filingDate, filing.accession));
     }

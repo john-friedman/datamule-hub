@@ -235,6 +235,8 @@ def _dataset_filing_filters(table):
 def _delta_keys_for_dates(table, filing_dates, api_key):
     keys = set()
     for filing_date in filing_dates:
+        if datetime.fromisoformat(filing_date).weekday() >= 5:
+            continue
         for data in stream_sgml(filing_date=filing_date, api_key=api_key, **_dataset_filing_filters(table)):
             for accession in data.get("accession", []):
                 keys.add(_source_key(table, filing_date, accession))
@@ -278,8 +280,9 @@ def _delta_filing_dates(last_modified, et_now):
     first = datetime.fromtimestamp(last_modified, EASTERN).date()
     last = _last_delta_filing_date(et_now)
     return [
-        (first + timedelta(days=offset)).isoformat()
-        for offset in range((last - first).days + 1)
+        date.isoformat()
+        for date in (first + timedelta(days=offset) for offset in range((last - first).days + 1))
+        if date.weekday() < 5
     ]
 
 
