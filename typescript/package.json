@@ -1,6 +1,6 @@
 {
   "name": "datamulehub",
-  "version": "0.2.25",
+  "version": "0.2.26",
   "description": "TypeScript client for Datamule cloud APIs",
   "repository": {
     "type": "git",

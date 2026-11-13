@@ -6,12 +6,18 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 futures = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tar = "0.4"
 tokio = { version = "1", features = ["full"] }
 zstd = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 
 [profile.release]
 opt-level = 3

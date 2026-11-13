@@ -497,7 +497,6 @@ async fn main() -> Result<()> {
     let cpu = Arc::new(Semaphore::new(decomp_workers));
     let stdout = std::io::stdout();
     let mut output = BufWriter::new(stdout.lock());
-    let mut failed = false;
 
     let work = stream::iter(jobs.into_iter().map(|job| {
         let client = client.clone();
@@ -541,7 +540,6 @@ async fn main() -> Result<()> {
                 )?;
             }
             Err(error) => {
-                failed |= mode == Mode::Xbrl;
                 serde_json::to_writer(
                     &mut output,
                     &json!({
@@ -556,9 +554,6 @@ async fn main() -> Result<()> {
     }
 
     sink.finish()?;
-    if failed {
-        bail!("one or more XBRL downloads failed");
-    }
     Ok(())
 }
 
